@@ -682,61 +682,36 @@ def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 # EXPECTATIVAS FOCUS
 # =============================================================================
 
-def buscar_focus_expectativa_anual(
-    indicador: str,
-    ano_ref: int,
-    indicador_detalhe: Optional[str] = None,
-) -> Optional[float]:
-    """
-    Retorna a MEDIANA das expectativas anuais (Focus) para um indicador
-    e ano de referência.
-
-    Faz filtro simples no OData (Indicador / IndicadorDetalhe) e
-    filtra o ano (DataReferencia) no pandas, para evitar erro 400.
-    """
-    endpoint = f"{FOCUS_BASE_URL}/ExpectativasMercadoAnuais"
-
-    filtros = [f"Indicador eq '{indicador}'"]
-    if indicador_detalhe is not None:
-        filtros.append(f"IndicadorDetalhe eq '{indicador_detalhe}'")
-
-    params = {
-        "$top": "10000",
-        "$format": "json",
-        "$filter": " and ".join(filtros),
-    }
+def buscar_focus_expectativa_anual(indicador, detalhe, ano_desejado):
+    """Busca a mediana das expectativas anuais do Focus para um indicador específico."""
+    base_url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/"
+    
+    url = (
+        base_url +
+        "ExpectativasMercadoAnuais?"
+        "$top=50&$format=json&"
+        f"$filter=Indicador%20eq%20'{indicador}'%20and%20IndicadorDetalhe%20eq%20'{detalhe}'"
+    )
 
     try:
-        resp = requests.get(endpoint, params=params, timeout=20)
-        resp.raise_for_status()
-        data = resp.json().get("value", [])
-    except Exception:
-        return None
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        dados = r.json()["value"]
 
-    if not data:
-        return None
+        # Filtra pelo ano desejado (ex: 2025)
+        dados_ano = [item for item in dados if item.get("DataReferencia") == str(ano_desejado)]
+        if not dados_ano:
+            return "-"
 
-    df = pd.DataFrame(data)
-    if df.empty or "DataReferencia" not in df.columns:
-        return None
+        # Pega mediana
+        mediana = dados_ano[0].get("Mediana")
+        if mediana is None:
+            return "-"
 
-    df["DataReferencia"] = pd.to_numeric(df["DataReferencia"], errors="coerce")
-    df = df[df["DataReferencia"] == ano_ref]
+        return f"{mediana:.2f}"
 
-    if df.empty:
-        return None
-
-    if "Data" in df.columns:
-        df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
-        df = df.sort_values("Data")
-
-    mediana = df.iloc[-1].get("Mediana")
-
-    try:
-        return float(mediana)
-    except (TypeError, ValueError):
-        return None
-
+    except Exception as e:
+        return f"Erro: {e}"
 
 def formatar_focus_valor(valor: Optional[float], tipo: str) -> str:
     """
@@ -1153,71 +1128,28 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
     return pd.DataFrame(linhas)
 
 
-def montar_tabela_focus() -> pd.DataFrame:
-    ano_atual = date.today().year
-    prox_ano = ano_atual + 1
+def montar_tabela_focus():
+    ano_atual = datetime.now().year
+    anos = [ano_atual, ano_atual + 1]
 
-    specs = [
-        {
-            "label": "IPCA (% a.a.)",
-            "indicador": "IPCA",
-            "tipo": "percent",
-            "detalhe": None,
-        },
-        {
-            "label": "PIB Total (% a.a.)",
-            "indicador": "PIB Total",
-            "tipo": "percent",
-            "detalhe": None,
-        },
-        {
-            "label": "Selic fim de ano (% a.a.)",
-            "indicador": "Meta para taxa over-selic",
-            "tipo": "percent",
-            "detalhe": "Fim do ano",
-        },
-        {
-            "label": "Câmbio fim de ano (R$/US$)",
-            "indicador": "Taxa de câmbio",
-            "tipo": "cambio",
-            "detalhe": "Fim do ano",
-        },
+    indicadores = [
+        ("IPCA (a.a.)", "IPCA", "Índice cheio"),
+        ("PIB Total (var.%)", "PIB Total", "Var. %"),
+        ("Selic fim do ano (a.a.)", "Selic Meta", "Fim de período"),
+        ("Câmbio fim do ano (R$/US$)", "Câmbio", "R$/US$ - fim de período"),
     ]
 
-    linhas: List[Dict[str, str]] = []
+    linhas = []
+    for nome_exibicao, indicador, detalhe in indicadores:
+        linha = {"Indicador": nome_exibicao}
+        for ano in anos:
+            valor = buscar_focus_expectativa_anual(indicador, detalhe, ano)
+            linha[str(ano)] = valor
+        linha["Fonte"] = "BCB / Focus – Expectativas de Mercado Anuais"
+        linhas.append(linha)
 
-    for s in specs:
-        try:
-            v_atual = buscar_focus_expectativa_anual(
-                indicador=s["indicador"],
-                ano_ref=ano_atual,
-                indicador_detalhe=s["detalhe"],
-            )
-            v_prox = buscar_focus_expectativa_anual(
-                indicador=s["indicador"],
-                ano_ref=prox_ano,
-                indicador_detalhe=s["detalhe"],
-            )
+    return linhas
 
-            linhas.append(
-                {
-                    "Indicador": s["label"],
-                    f"{ano_atual}": formatar_focus_valor(v_atual, s["tipo"]),
-                    f"{prox_ano}": formatar_focus_valor(v_prox, s["tipo"]),
-                    "Fonte": "BCB / Focus – Expectativas de Mercado Anuais",
-                }
-            )
-        except Exception as e:
-            linhas.append(
-                {
-                    "Indicador": s["label"],
-                    f"{ano_atual}": f"Erro: {e}",
-                    f"{prox_ano}": "-",
-                    "Fonte": "BCB / Focus – Expectativas de Mercado Anuais",
-                }
-            )
-
-    return pd.DataFrame(linhas)
 
 
 # =============================================================================
