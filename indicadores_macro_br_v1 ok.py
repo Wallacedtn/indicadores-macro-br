@@ -7,41 +7,6 @@ from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 import streamlit as st
 from typing import Optional, Dict, List
-from functools import lru_cache
-
-# =============================================================================
-# HELPER DE REDE COM RETRY
-# =============================================================================
-
-def _get_with_retry(
-    url: str,
-    max_attempts: int = 3,
-    timeout: int = 30,
-) -> requests.Response:
-    """
-    Faz GET com poucas tentativas e timeout configurável.
-    - Retry só em Timeout / ConnectionError.
-    - Erros 4xx/5xx não fazem retry (provavelmente problema de URL/servidor).
-    """
-    last_exc: Optional[Exception] = None
-
-    for attempt in range(1, max_attempts + 1):
-        try:
-            resp = requests.get(url, timeout=timeout)
-            resp.raise_for_status()
-            return resp
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-            last_exc = e
-            if attempt == max_attempts:
-                raise
-        except requests.exceptions.RequestException:
-            # 4xx/5xx ou outros erros: não adianta tentar de novo
-            raise
-
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("Falha inesperada em _get_with_retry")
-
 
 # =============================================================================
 # INDICADORES QUE ESTE APP ACOMPANHA
@@ -66,10 +31,7 @@ def _get_with_retry(
 #       v/11625 -> variação acumulada no ano
 #       v/11626 -> variação acumulada em 12 meses
 #
-# - Indústria (PIM-PF) – volume (tabela 8888, Brasil, Indústria Geral):
-#       v/11601 -> variação M/M-1 com ajuste sazonal
-#       v/11603 -> variação acumulada no ano
-#       v/11604 -> variação acumulada em 12 meses
+# - Indústria (PIM-PF) – em construção
 # =============================================================================
 
 
@@ -91,10 +53,11 @@ IBGE_VARIAVEL_IPCA15 = 355
 
 IBGE_NIVEL_BRASIL = "n1/all"  # nível Brasil
 
-# API OLINDA – EXPECTATIVAS FOCUS
-FOCUS_BASE_URL = (
-    "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata"
-)
+# Tabela PMC (comércio varejista – índice e variação do volume de vendas)
+IBGE_TABELA_PMC = 8880
+
+# Tabela PMS (serviços – índice e variação do volume de serviços)
+IBGE_TABELA_PMS = 5906
 
 
 # =============================================================================
@@ -112,12 +75,6 @@ def _um_ano_atras_str() -> str:
     return dt.strftime("%d/%m/%Y")
 
 
-def _dois_anos_atras_str() -> str:
-    """Data de 2 anos atrás em dd/mm/aaaa."""
-    dt = date.today() - relativedelta(years=2)
-    return dt.strftime("%d/%m/%Y")
-
-
 def _formata_mes(dt: pd.Timestamp) -> str:
     """Formata data mensal como mm/aaaa."""
     if pd.isna(dt):
@@ -126,14 +83,8 @@ def _formata_mes(dt: pd.Timestamp) -> str:
 
 
 def _parse_periodo(p: str) -> pd.Timestamp:
-    """
-    Converte período do SIDRA em datetime.
-
-    Exemplos:
-    - '202510' -> 2025-10-01
-    - '2025-10' ou '2025-10-01' -> parse automático
-    """
-    p = str(p).strip()
+    """Converte período do SIDRA (ex: '202510') em datetime (1º dia do mês)."""
+    p = str(p)
     if len(p) == 6 and p.isdigit():
         ano = int(p[:4])
         mes = int(p[4:])
@@ -145,36 +96,8 @@ def _parse_periodo(p: str) -> pd.Timestamp:
 
 
 # =============================================================================
-# BANCO CENTRAL (SGS) – FUNÇÃO GENÉRICA COM CACHE + RETRY
+# BANCO CENTRAL (SGS)
 # =============================================================================
-
-@lru_cache(maxsize=32)
-def _buscar_serie_sgs_cached(
-    codigo: int,
-    data_inicial: Optional[str],
-    data_final: Optional[str],
-) -> pd.DataFrame:
-    """
-    Implementação interna com cache. Não chame diretamente;
-    use buscar_serie_sgs().
-    """
-    url = (
-        f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados"
-        f"?formato=json&dataInicial={data_inicial}&dataFinal={data_final}"
-    )
-
-    resp = _get_with_retry(url, max_attempts=3, timeout=30)
-    dados = resp.json()
-
-    if not dados:
-        return pd.DataFrame(columns=["data", "valor"])
-
-    df = pd.DataFrame(dados)
-    df["data"] = pd.to_datetime(df["data"], format="%d/%m/%Y")
-    df["valor"] = pd.to_numeric(df["valor"].astype(str).str.replace(",", "."), errors="coerce")
-    df = df.sort_values("data").reset_index(drop=True)
-    return df
-
 
 def buscar_serie_sgs(
     codigo: int,
@@ -189,11 +112,28 @@ def buscar_serie_sgs(
         data_inicial = _um_ano_atras_str()
     if data_final is None:
         data_final = _hoje_str()
-    return _buscar_serie_sgs_cached(codigo, data_inicial, data_final).copy()
+
+    url = (
+        f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados"
+        f"?formato=json&dataInicial={data_inicial}&dataFinal={data_final}"
+    )
+
+    resp = requests.get(url, timeout=20)
+    resp.raise_for_status()
+    dados = resp.json()
+
+    if not dados:
+        return pd.DataFrame(columns=["data", "valor"])
+
+    df = pd.DataFrame(dados)
+    df["data"] = pd.to_datetime(df["data"], format="%d/%m/%Y")
+    df["valor"] = pd.to_numeric(df["valor"].str.replace(",", "."), errors="coerce")
+    df = df.sort_values("data").reset_index(drop=True)
+    return df
 
 
 def buscar_selic_meta_aa() -> pd.DataFrame:
-    """Meta Selic (% a.a.). Último ano de dados."""
+    """Meta Selic (% a.a.)."""
     return buscar_serie_sgs(SGS_SERIES["selic_meta_aa"])
 
 
@@ -203,38 +143,27 @@ def buscar_cdi_diario() -> pd.DataFrame:
 
 
 def buscar_ptax_venda() -> pd.DataFrame:
-    """Dólar PTAX - venda (R$/US$). Usa janela de 2 anos para variações."""
-    return buscar_serie_sgs(
-        SGS_SERIES["ptax_venda"],
-        data_inicial=_dois_anos_atras_str(),
-        data_final=_hoje_str(),
-    )
+    """Dólar PTAX - venda (R$/US$)."""
+    return buscar_serie_sgs(SGS_SERIES["ptax_venda"])
 
 
 # =============================================================================
-# IBGE / SIDRA GENÉRICO (IPCA, IPCA-15, etc.) COM CACHE + p/last60
+# IBGE / SIDRA GENÉRICO (IPCA, IPCA-15, etc.)
 # =============================================================================
 
-@lru_cache(maxsize=64)
-def _buscar_serie_mensal_ibge_cached(
+def buscar_serie_mensal_ibge(
     tabela: int,
     variavel: int,
-    nivel: str,
+    nivel: str = IBGE_NIVEL_BRASIL
 ) -> pd.DataFrame:
     """
-    Implementação interna com cache. Não chame diretamente;
-    use buscar_serie_mensal_ibge().
-
-    IMPORTANTE:
-    - Usa p/last60 (últimos 60 meses), e não p/all,
-      para evitar respostas gigantes do SIDRA ao longo do tempo.
+    Busca uma série mensal simples na API SIDRA do IBGE.
+    Retorna DataFrame com ['data', 'valor'].
     """
-    url = (
-        f"https://apisidra.ibge.gov.br/values/"
-        f"t/{tabela}/{nivel}/v/{variavel}/p/last60"
-    )
+    url = f"https://apisidra.ibge.gov.br/values/t/{tabela}/{nivel}/v/{variavel}/p/all"
 
-    resp = _get_with_retry(url, max_attempts=3, timeout=30)
+    resp = requests.get(url, timeout=20)
+    resp.raise_for_status()
     dados = resp.json()
 
     if not dados:
@@ -244,19 +173,17 @@ def _buscar_serie_mensal_ibge_cached(
     linhas = dados[1:]
     df = pd.DataFrame(linhas)
 
-    # Descobre coluna de período (mais robusto)
+    # Descobre coluna de período
     col_periodo = None
     for col in df.columns:
-        titulo = str(header.get(col, "")).lower()
-        if any(p in titulo for p in ["mês (código)", "mes (código)", "mês", "mes", "período", "periodo"]):
+        titulo = header.get(col, "")
+        if any(p in titulo for p in ["Mês (Código)", "Mês", "Período"]):
             col_periodo = col
             break
 
     if col_periodo is None:
         if "D3C" in df.columns:
             col_periodo = "D3C"
-        elif "D2C" in df.columns:
-            col_periodo = "D2C"
         else:
             col_periodo = df.columns[0]
 
@@ -268,26 +195,8 @@ def _buscar_serie_mensal_ibge_cached(
         errors="coerce"
     )
 
-    df = (
-        df[["data", "valor"]]
-        .dropna()
-        .sort_values("data")
-        .drop_duplicates(subset=["data"], keep="last")
-        .reset_index(drop=True)
-    )
+    df = df[["data", "valor"]].dropna().sort_values("data").reset_index(drop=True)
     return df
-
-
-def buscar_serie_mensal_ibge(
-    tabela: int,
-    variavel: int,
-    nivel: str = IBGE_NIVEL_BRASIL
-) -> pd.DataFrame:
-    """
-    Busca uma série mensal simples na API SIDRA do IBGE.
-    Retorna DataFrame com ['data', 'valor'].
-    """
-    return _buscar_serie_mensal_ibge_cached(tabela, variavel, nivel).copy()
 
 
 def buscar_ipca_ibge() -> pd.DataFrame:
@@ -301,17 +210,16 @@ def buscar_ipca15_ibge() -> pd.DataFrame:
 
 
 # =============================================================================
-# IBGE / SIDRA – HELPER GENÉRICO PARA PMC / PMS / PIM (com retry)
+# IBGE / SIDRA – HELPER GENÉRICO PARA PMC / PMS
 # =============================================================================
 
-@lru_cache(maxsize=128)
-def _buscar_serie_sidra_valor_cached(url: str) -> pd.DataFrame:
+def _buscar_serie_sidra_valor(url: str) -> pd.DataFrame:
     """
     Helper genérico: busca uma série na API do SIDRA
     e devolve DataFrame ['data', 'valor'].
-    Implementação com cache.
     """
-    resp = _get_with_retry(url, max_attempts=3, timeout=30)
+    resp = requests.get(url, timeout=20)
+    resp.raise_for_status()
     dados = resp.json()
 
     if not dados:
@@ -321,19 +229,15 @@ def _buscar_serie_sidra_valor_cached(url: str) -> pd.DataFrame:
     linhas = dados[1:]
     df = pd.DataFrame(linhas)
 
-    # Detecta coluna de período de forma robusta
     col_periodo = None
     for col in df.columns:
-        titulo = str(header.get(col, "")).lower()
-        if any(p in titulo for p in ["mês (código)", "mes (código)", "mês", "mes", "período", "periodo"]):
+        titulo = header.get(col, "")
+        if any(p in titulo for p in ["Mês (Código)", "Mês", "Período"]):
             col_periodo = col
             break
-
     if col_periodo is None:
         if "D3C" in df.columns:
             col_periodo = "D3C"
-        elif "D2C" in df.columns:
-            col_periodo = "D2C"
         else:
             col_periodo = df.columns[0]
 
@@ -353,24 +257,24 @@ def _buscar_serie_sidra_valor_cached(url: str) -> pd.DataFrame:
     return df
 
 
-def _buscar_serie_sidra_valor(url: str) -> pd.DataFrame:
-    """Wrapper sem cache mutável (retorna cópia)."""
-    return _buscar_serie_sidra_valor_cached(url).copy()
-
-
 # =============================================================================
-# ATIVIDADE ECONÔMICA – PMC / PMS / PIM
+# ATIVIDADE ECONÔMICA – PMC (VAREJO) – SÉRIES OFICIAIS
 # =============================================================================
 
 def buscar_pmc_var_mom_ajustada() -> pd.DataFrame:
     """
+    Série oficial do IBGE:
     PMC - Variação mês/mês imediatamente anterior,
-    com ajuste sazonal (M/M-1), volume de vendas no
+    COM ajuste sazonal (M/M-1), volume de vendas no
     comércio varejista (restrito), Brasil.
+
+    Parâmetros para a API:
+    https://apisidra.ibge.gov.br/values/
+        t/8880/n1/all/v/11708/p/all/c11046/56734/d/v11708%201
     """
     url = (
         "https://apisidra.ibge.gov.br/values/"
-        "t/8880/n1/all/v/11708/p/last60/c11046/56734/d/v11708%201"
+        "t/8880/n1/all/v/11708/p/all/c11046/56734/d/v11708%201"
     )
     return _buscar_serie_sidra_valor(url)
 
@@ -383,7 +287,7 @@ def buscar_pmc_var_acum_ano() -> pd.DataFrame:
     """
     url = (
         "https://apisidra.ibge.gov.br/values/"
-        "t/8880/n1/all/v/11710/p/last60/c11046/56734/d/v11710%201"
+        "t/8880/n1/all/v/11710/p/all/c11046/56734/d/v11710%201"
     )
     return _buscar_serie_sidra_valor(url)
 
@@ -396,93 +300,17 @@ def buscar_pmc_var_acum_12m() -> pd.DataFrame:
     """
     url = (
         "https://apisidra.ibge.gov.br/values/"
-        "t/8880/n1/all/v/11711/p/last60/c11046/56734/d/v11711%201"
+        "t/8880/n1/all/v/11711/p/all/c11046/56734/d/v11711%201"
     )
     return _buscar_serie_sidra_valor(url)
 
-
-def buscar_pms_var_mom_ajustada() -> pd.DataFrame:
-    """
-    PMS - Variação mês/mês imediatamente anterior, com ajuste sazonal (M/M-1),
-    índice de volume de serviços, Brasil.
-    """
-    url = (
-        "https://apisidra.ibge.gov.br/values/"
-        "t/5906/n1/all/v/11623/p/last60/c11046/56726/d/v11623%201"
-    )
-    return _buscar_serie_sidra_valor(url)
-
-
-def buscar_pms_var_acum_ano() -> pd.DataFrame:
-    """
-    PMS - Variação acumulada no ano,
-    índice de volume de serviços, Brasil.
-    """
-    url = (
-        "https://apisidra.ibge.gov.br/values/"
-        "t/5906/n1/all/v/11625/p/last60/c11046/56726/d/v11625%201"
-    )
-    return _buscar_serie_sidra_valor(url)
-
-
-def buscar_pms_var_acum_12m() -> pd.DataFrame:
-    """
-    PMS - Variação acumulada em 12 meses,
-    índice de volume de serviços, Brasil.
-    """
-    url = (
-        "https://apisidra.ibge.gov.br/values/"
-        "t/5906/n1/all/v/11626/p/last60/c11046/56726/d/v11626%201"
-    )
-    return _buscar_serie_sidra_valor(url)
-
-
-def buscar_pim_var_mom_ajustada() -> pd.DataFrame:
-    """
-    PIM-PF – Variação mês/mês imediatamente anterior (%), com ajuste sazonal.
-    Fonte oficial: tabela 8888, variável 11601, Brasil, Indústria Geral.
-    """
-    url = (
-        "https://apisidra.ibge.gov.br/values/"
-        "t/8888/n1/all/v/11601/p/last60/c544/129314/d/v11601%201"
-    )
-    return _buscar_serie_sidra_valor(url)
-
-
-def buscar_pim_var_acum_ano() -> pd.DataFrame:
-    """
-    PIM-PF – Variação acumulada no ano (%).
-    Fonte: tabela 8888, variável 11603.
-    """
-    url = (
-        "https://apisidra.ibge.gov.br/values/"
-        "t/8888/n1/all/v/11603/p/last60/c544/129314/d/v11603%201"
-    )
-    return _buscar_serie_sidra_valor(url)
-
-
-def buscar_pim_var_acum_12m() -> pd.DataFrame:
-    """
-    PIM-PF – Variação acumulada em 12 meses (%).
-    Fonte: tabela 8888, variável 11604.
-    """
-    url = (
-        "https://apisidra.ibge.gov.br/values/"
-        "t/8888/n1/all/v/11604/p/last60/c544/129314/d/v11604%201"
-    )
-    return _buscar_serie_sidra_valor(url)
-
-
-# =============================================================================
-# RESUMOS PMC / PMS / PIM
-# =============================================================================
 
 def _resumo_triple_series(
     df_mom: pd.DataFrame,
     df_ano: pd.DataFrame,
     df_12: pd.DataFrame
 ) -> Dict[str, float]:
-    """Helper reutilizado por PMC, PMS e PIM-PF."""
+    """Helper reutilizado por PMC e PMS."""
     if df_mom.empty and df_ano.empty and df_12.empty:
         return {
             "referencia": "-",
@@ -491,6 +319,7 @@ def _resumo_triple_series(
             "acum_12m": float("nan"),
         }
 
+    # data de referência: prioridade M/M-1, depois ano, depois 12m
     if not df_mom.empty:
         data_ref = df_mom["data"].max()
     elif not df_ano.empty:
@@ -528,6 +357,58 @@ def resumo_pmc_oficial() -> Dict[str, float]:
     return _resumo_triple_series(df_mom, df_ano, df_12)
 
 
+# =============================================================================
+# ATIVIDADE ECONÔMICA – PMS (SERVIÇOS) – SÉRIES OFICIAIS
+# =============================================================================
+
+def buscar_pms_var_mom_ajustada() -> pd.DataFrame:
+    """
+    PMS - Variação mês/mês imediatamente anterior, com ajuste sazonal (M/M-1),
+    índice de volume de serviços, Brasil.
+
+    Link enviado:
+    https://apisidra.ibge.gov.br/values/
+        t/5906/n1/all/v/11623/p/all/c11046/56726/d/v11623%201
+    """
+    url = (
+        "https://apisidra.ibge.gov.br/values/"
+        "t/5906/n1/all/v/11623/p/all/c11046/56726/d/v11623%201"
+    )
+    return _buscar_serie_sidra_valor(url)
+
+
+def buscar_pms_var_acum_ano() -> pd.DataFrame:
+    """
+    PMS - Variação acumulada no ano,
+    índice de volume de serviços, Brasil.
+
+    Link enviado:
+    https://apisidra.ibge.gov.br/values/
+        t/5906/n1/all/v/11625/p/all/c11046/56726/d/v11625%201
+    """
+    url = (
+        "https://apisidra.ibge.gov.br/values/"
+        "t/5906/n1/all/v/11625/p/all/c11046/56726/d/v11625%201"
+    )
+    return _buscar_serie_sidra_valor(url)
+
+
+def buscar_pms_var_acum_12m() -> pd.DataFrame:
+    """
+    PMS - Variação acumulada em 12 meses,
+    índice de volume de serviços, Brasil.
+
+    Link enviado:
+    https://apisidra.ibge.gov.br/values/
+        t/5906/n1/all/v/11626/p/all/c11046/56726/d/v11626%201
+    """
+    url = (
+        "https://apisidra.ibge.gov.br/values/"
+        "t/5906/n1/all/v/11626/p/all/c11046/56726/d/v11626%201"
+    )
+    return _buscar_serie_sidra_valor(url)
+
+
 def resumo_pms_oficial() -> Dict[str, float]:
     """Resumo oficial dos serviços (PMS) – volume."""
     df_mom = buscar_pms_var_mom_ajustada()
@@ -536,21 +417,14 @@ def resumo_pms_oficial() -> Dict[str, float]:
     return _resumo_triple_series(df_mom, df_ano, df_12)
 
 
-def resumo_pim_oficial() -> Dict[str, float]:
-    """Resumo da indústria (PIM-PF) – produção física."""
-    df_mom = buscar_pim_var_mom_ajustada()
-    df_ano = buscar_pim_var_acum_ano()
-    df_12 = buscar_pim_var_acum_12m()
-    return _resumo_triple_series(df_mom, df_ano, df_12)
-
-
 # =============================================================================
-# INFLAÇÃO – CÁLCULOS
+# CÁLCULOS PARA INFLAÇÃO
 # =============================================================================
 
 def _acumula_percentuais(valores: pd.Series) -> float:
     """
-    Recebe uma série de variações mensais em % e retorna o acumulado composto.
+    Recebe uma série de variações mensais em % (ex: 0.09, 0.18, ...)
+    e retorna o acumulado composto em %.
     """
     if valores.empty:
         return float("nan")
@@ -566,14 +440,6 @@ def resumo_inflacao(df: pd.DataFrame) -> Dict[str, float]:
     - acumulado no ano
     - acumulado em 12 meses
     """
-    if df.empty:
-        return {
-            "referencia": "-",
-            "mensal": float("nan"),
-            "acum_ano": float("nan"),
-            "acum_12m": float("nan"),
-        }
-
     df = df.sort_values("data").reset_index(drop=True)
     ult = df.iloc[-1]
     ref_mes = _formata_mes(ult["data"])
@@ -587,6 +453,7 @@ def resumo_inflacao(df: pd.DataFrame) -> Dict[str, float]:
     else:
         acum_ano = float("nan")
 
+    # últimos 12 meses (ou menos, se não houver histórico)
     if len(df) >= 2:
         df_12m = df.tail(12)
         acum_12m = _acumula_percentuais(df_12m["valor"])
@@ -602,37 +469,24 @@ def resumo_inflacao(df: pd.DataFrame) -> Dict[str, float]:
 
 
 # =============================================================================
-# CÂMBIO – RESUMO (níveis + variações)
+# CÂMBIO – RESUMO
 # =============================================================================
 
 def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
     """
     Para o câmbio (PTAX, em R$/US$), calcula:
-    - último valor (cotação atual)
-    - valor há 12 meses e 24 meses
+    - último valor
     - variação no ano (%)
     - variação em 12 meses (%)
-    - variação em 24 meses (%)
     """
     if df.empty:
-        return {
-            "ultimo": None,
-            "ultima_data": None,
-            "valor_12m": None,
-            "data_12m": None,
-            "valor_24m": None,
-            "data_24m": None,
-            "var_ano": None,
-            "var_12m": None,
-            "var_24m": None,
-        }
+        return {"ultimo": None, "var_ano": None, "var_12m": None, "ultima_data": None}
 
     df = df.sort_values("data").reset_index(drop=True)
     ult = df.iloc[-1]
-    ultima_data = ult["data"]
     ultimo_valor = ult["valor"]
+    ultima_data = ult["data"]
 
-    # Variação no ano (YTD)
     ano_ref = ultima_data.year
     df_ano = df[df["data"].dt.year == ano_ref]
     if not df_ano.empty:
@@ -641,123 +495,34 @@ def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
     else:
         var_ano = None
 
-    # Há 12 meses
     corte_12m = ultima_data - relativedelta(years=1)
     df_12m = df[df["data"] >= corte_12m]
     if not df_12m.empty:
-        valor_12m = df_12m.iloc[0]["valor"]
-        data_12m = df_12m.iloc[0]["data"]
-        var_12m = (ultimo_valor / valor_12m - 1) * 100.0
+        inicio_12m = df_12m.iloc[0]["valor"]
+        var_12m = (ultimo_valor / inicio_12m - 1) * 100.0
     else:
-        valor_12m = None
-        data_12m = None
         var_12m = None
-
-    # Há 24 meses
-    corte_24m = ultima_data - relativedelta(years=2)
-    df_24m = df[df["data"] >= corte_24m]
-    if not df_24m.empty:
-        valor_24m = df_24m.iloc[0]["valor"]
-        data_24m = df_24m.iloc[0]["data"]
-        var_24m = (ultimo_valor / valor_24m - 1) * 100.0
-    else:
-        valor_24m = None
-        data_24m = None
-        var_24m = None
 
     return {
         "ultimo": ultimo_valor,
         "ultima_data": ultima_data,
-        "valor_12m": valor_12m,
-        "data_12m": data_12m,
-        "valor_24m": valor_24m,
-        "data_24m": data_24m,
         "var_ano": var_ano,
         "var_12m": var_12m,
-        "var_24m": var_24m,
     }
 
 
 # =============================================================================
-# EXPECTATIVAS FOCUS
-# =============================================================================
-
-def buscar_focus_expectativa_anual(
-    indicador: str,
-    ano_ref: int,
-    indicador_detalhe: Optional[str] = None,
-) -> Optional[float]:
-    """
-    Retorna a MEDIANA das expectativas anuais (Focus) para um indicador
-    e ano de referência.
-
-    Faz filtro simples no OData (Indicador / IndicadorDetalhe) e
-    filtra o ano (DataReferencia) no pandas, para evitar erro 400.
-    """
-    endpoint = f"{FOCUS_BASE_URL}/ExpectativasMercadoAnuais"
-
-    filtros = [f"Indicador eq '{indicador}'"]
-    if indicador_detalhe is not None:
-        filtros.append(f"IndicadorDetalhe eq '{indicador_detalhe}'")
-
-    params = {
-        "$top": "10000",
-        "$format": "json",
-        "$filter": " and ".join(filtros),
-    }
-
-    try:
-        resp = requests.get(endpoint, params=params, timeout=20)
-        resp.raise_for_status()
-        data = resp.json().get("value", [])
-    except Exception:
-        return None
-
-    if not data:
-        return None
-
-    df = pd.DataFrame(data)
-    if df.empty or "DataReferencia" not in df.columns:
-        return None
-
-    df["DataReferencia"] = pd.to_numeric(df["DataReferencia"], errors="coerce")
-    df = df[df["DataReferencia"] == ano_ref]
-
-    if df.empty:
-        return None
-
-    if "Data" in df.columns:
-        df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
-        df = df.sort_values("Data")
-
-    mediana = df.iloc[-1].get("Mediana")
-
-    try:
-        return float(mediana)
-    except (TypeError, ValueError):
-        return None
-
-
-def formatar_focus_valor(valor: Optional[float], tipo: str) -> str:
-    """
-    tipo:
-      - 'percent' -> formata como 4.55%
-      - 'cambio'  -> formata como R$ 5.40
-    """
-    if valor is None:
-        return "-"
-
-    if tipo == "cambio":
-        return f"R$ {valor:.2f}"
-    else:
-        return f"{valor:.2f}%"
-
-
-# =============================================================================
-# TABELAS RESUMO
+# FUNÇÕES PARA MONTAR TABELAS RESUMO
 # =============================================================================
 
 def montar_tabela_inflacao() -> pd.DataFrame:
+    """
+    Monta uma tabela com IPCA e IPCA-15:
+    - Mês de referência
+    - Valor (mensal)
+    - Acumulado no ano
+    - Acumulado em 12 meses
+    """
     linhas: List[Dict[str, str]] = []
 
     # IPCA
@@ -770,12 +535,10 @@ def montar_tabela_inflacao() -> pd.DataFrame:
                 "Mês ref.": r["referencia"],
                 "Valor (mensal)": f"{r['mensal']:.2f}%",
                 "Acum. no ano": (
-                    f"{r['acum_ano']:.2f}%"
-                    if pd.notna(r["acum_ano"]) else "-"
+                    f"{r['acum_ano']:.2f}%" if pd.notna(r["acum_ano"]) else "-"
                 ),
                 "Acum. 12 meses": (
-                    f"{r['acum_12m']:.2f}%"
-                    if pd.notna(r["acum_12m"]) else "-"
+                    f"{r['acum_12m']:.2f}%" if pd.notna(r["acum_12m"]) else "-"
                 ),
                 "Fonte": "IBGE / SIDRA (Tabela 1737)",
             })
@@ -808,12 +571,10 @@ def montar_tabela_inflacao() -> pd.DataFrame:
                 "Mês ref.": r["referencia"],
                 "Valor (mensal)": f"{r['mensal']:.2f}%",
                 "Acum. no ano": (
-                    f"{r['acum_ano']:.2f}%"
-                    if pd.notna(r["acum_ano"]) else "-"
+                    f"{r['acum_ano']:.2f}%" if pd.notna(r["acum_ano"]) else "-"
                 ),
                 "Acum. 12 meses": (
-                    f"{r['acum_12m']:.2f}%"
-                    if pd.notna(r["acum_12m"]) else "-"
+                    f"{r['acum_12m']:.2f}%" if pd.notna(r["acum_12m"]) else "-"
                 ),
                 "Fonte": "IBGE / SIDRA (Tabela 3065)",
             })
@@ -840,6 +601,12 @@ def montar_tabela_inflacao() -> pd.DataFrame:
 
 
 def montar_tabela_selic_meta() -> pd.DataFrame:
+    """
+    Tabela com Selic Meta:
+    - Nível atual
+    - Nível no início do ano
+    - Nível há 12 meses
+    """
     linhas: List[Dict[str, str]] = []
 
     try:
@@ -901,65 +668,57 @@ def montar_tabela_selic_meta() -> pd.DataFrame:
 
 
 def montar_tabela_cdi() -> pd.DataFrame:
+    """
+    Tabela com CDI diário:
+    - Nível diário (% a.d.)
+    - Projeção de mês (21 dias úteis)
+    - Projeção de ano (252 dias úteis)
+    - CDI acumulado nos últimos 12 meses passados
+    """
     linhas: List[Dict[str, str]] = []
 
     try:
         df = buscar_cdi_diario()
-        if df.empty:
-            raise ValueError("Sem dados do CDI.")
+        if not df.empty:
+            df = df.sort_values("data").reset_index(drop=True)
+            ult = df.iloc[-1]
+            ultima_data = ult["data"]
+            taxa_dia = ult["valor"]  # % a.d.
 
-        df = df.sort_values("data").reset_index(drop=True)
+            # Projeções mantendo a taxa de hoje
+            fator_mes = (1 + taxa_dia / 100) ** 21 - 1
+            fator_ano = (1 + taxa_dia / 100) ** 252 - 1
 
-        ult = df.iloc[-1]
-        data_ult = ult["data"]
-        taxa_ult = ult["valor"]  # % a.d.
+            # CDI acumulado nos ~últimos 12 meses (janela do DataFrame)
+            fator_12m_real = (1 + df["valor"] / 100).prod() - 1
 
-        ano_ref = data_ult.year
-        mes_ref = data_ult.month
-
-        df_mes = df[
-            (df["data"].dt.year == ano_ref) &
-            (df["data"].dt.month == mes_ref)
-        ]
-        if not df_mes.empty:
-            fator_mes = (1 + df_mes["valor"] / 100).prod()
-            cdi_mes = (fator_mes - 1) * 100.0
+            linhas.append({
+                "Indicador": "CDI (over) diário",
+                "Data": ultima_data.strftime("%d/%m/%Y"),
+                "Nível (a.d.)": f"{taxa_dia:.4f}% a.d.",
+                "Proj. mês": f"{fator_mes * 100:.2f}%",
+                "Proj. ano": f"{fator_ano * 100:.2f}%",
+                "CDI 12m (passado)": f"{fator_12m_real * 100:.2f}%",
+                "Fonte": f"BCB / SGS ({SGS_SERIES['cdi_diario']})",
+            })
         else:
-            cdi_mes = float("nan")
-
-        df_ano = df[df["data"].dt.year == ano_ref]
-        if not df_ano.empty:
-            fator_ano = (1 + df_ano["valor"] / 100).prod()
-            cdi_ano = (fator_ano - 1) * 100.0
-        else:
-            cdi_ano = float("nan")
-
-        corte_12m = data_ult - relativedelta(years=1)
-        df_12m = df[df["data"] > corte_12m]
-        if not df_12m.empty:
-            fator_12m = (1 + df_12m["valor"] / 100).prod()
-            cdi_12m = (fator_12m - 1) * 100.0
-        else:
-            cdi_12m = float("nan")
-
-        linhas.append({
-            "Indicador": "CDI (over) diário",
-            "Data ref.": data_ult.strftime("%d/%m/%Y"),
-            "Nível diário": f"{taxa_ult:.4f}% a.d.",
-            "CDI no mês": f"{cdi_mes:.2f}%" if pd.notna(cdi_mes) else "-",
-            "CDI no ano": f"{cdi_ano:.2f}%" if pd.notna(cdi_ano) else "-",
-            "CDI em 12 meses": f"{cdi_12m:.2f}%" if pd.notna(cdi_12m) else "-",
-            "Fonte": f"BCB / SGS ({SGS_SERIES['cdi_diario']})",
-        })
-
+            linhas.append({
+                "Indicador": "CDI (over) diário",
+                "Data": "-",
+                "Nível (a.d.)": "sem dados",
+                "Proj. mês": "-",
+                "Proj. ano": "-",
+                "CDI 12m (passado)": "-",
+                "Fonte": "BCB / SGS",
+            })
     except Exception as e:
         linhas.append({
             "Indicador": "CDI (over) diário",
-            "Data ref.": "-",
-            "Nível diário": f"Erro: {e}",
-            "CDI no mês": "-",
-            "CDI no ano": "-",
-            "CDI em 12 meses": "-",
+            "Data": "-",
+            "Nível (a.d.)": f"Erro: {e}",
+            "Proj. mês": "-",
+            "Proj. ano": "-",
+            "CDI 12m (passado)": "-",
             "Fonte": "BCB / SGS",
         })
 
@@ -967,60 +726,43 @@ def montar_tabela_cdi() -> pd.DataFrame:
 
 
 def montar_tabela_ptax() -> pd.DataFrame:
+    """
+    Tabela com Dólar PTAX - venda:
+    - Nível atual
+    - Variação no ano (%)
+    - Variação em 12 meses (%)
+    """
     linhas: List[Dict[str, str]] = []
 
     try:
         df = buscar_ptax_venda()
         r = resumo_cambio(df)
-
         if r["ultimo"] is not None:
-            ultima_data_str = r["ultima_data"].strftime("%d/%m/%Y")
-            nivel_atual = f"R$ {r['ultimo']:.4f}"
-
-            if r["valor_12m"] is not None and r["data_12m"] is not None:
-                nivel_12m = f"R$ {r['valor_12m']:.4f} ({r['data_12m'].strftime('%d/%m/%Y')})"
-            else:
-                nivel_12m = "-"
-
-            if r["valor_24m"] is not None and r["data_24m"] is not None:
-                nivel_24m = f"R$ {r['valor_24m']:.4f} ({r['data_24m'].strftime('%d/%m/%Y')})"
-            else:
-                nivel_24m = "-"
-
+            ultima_data = r["ultima_data"].strftime("%d/%m/%Y")
+            nivel = f"R$ {r['ultimo']:.4f}"
             var_ano = f"{r['var_ano']:+.2f}%" if r["var_ano"] is not None else "-"
             var_12m = f"{r['var_12m']:+.2f}%" if r["var_12m"] is not None else "-"
-            var_24m = f"{r['var_24m']:+.2f}%" if r["var_24m"] is not None else "-"
         else:
-            ultima_data_str = "-"
-            nivel_atual = "sem dados"
-            nivel_12m = "-"
-            nivel_24m = "-"
+            ultima_data = "-"
+            nivel = "sem dados"
             var_ano = "-"
             var_12m = "-"
-            var_24m = "-"
 
         linhas.append({
             "Indicador": "Dólar PTAX - venda",
-            "Data": ultima_data_str,
-            "Nível atual": nivel_atual,
-            "Nível há 12m": nivel_12m,
-            "Nível há 24m": nivel_24m,
+            "Data": ultima_data,
+            "Nível": nivel,
             "Var. ano": var_ano,
             "Var. 12m": var_12m,
-            "Var. 24m": var_24m,
             "Fonte": f"BCB / SGS ({SGS_SERIES['ptax_venda']})",
         })
-
     except Exception as e:
         linhas.append({
             "Indicador": "Dólar PTAX - venda",
             "Data": "-",
-            "Nível atual": f"Erro: {e}",
-            "Nível há 12m": "-",
-            "Nível há 24m": "-",
+            "Nível": f"Erro: {e}",
             "Var. ano": "-",
             "Var. 12m": "-",
-            "Var. 24m": "-",
             "Fonte": "BCB / SGS",
         })
 
@@ -1028,9 +770,17 @@ def montar_tabela_ptax() -> pd.DataFrame:
 
 
 def montar_tabela_atividade_economica() -> pd.DataFrame:
+    """
+    Bloco de Atividade Econômica (IBGE).
+
+    - Varejo (PMC): usa as três séries oficiais do IBGE
+      (M/M-1 ajustado, acumulado no ano, acumulado em 12 meses).
+    - Serviços (PMS): idem, com tabela 5906.
+    - Indústria (PIM-PF): placeholder.
+    """
     linhas: List[Dict[str, str]] = []
 
-    # Varejo
+    # VAREJO (PMC) – volume
     try:
         r_pmc = resumo_pmc_oficial()
         if r_pmc["referencia"] != "-":
@@ -1070,7 +820,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
             "Fonte": "IBGE / PMC (SIDRA – Tabela 8880)",
         })
 
-    # Serviços
+    # SERVIÇOS (PMS) – volume
     try:
         r_pms = resumo_pms_oficial()
         if r_pms["referencia"] != "-":
@@ -1110,112 +860,15 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
             "Fonte": "IBGE / PMS (SIDRA – Tabela 5906)",
         })
 
-    # Indústria
-    try:
-        r_pim = resumo_pim_oficial()
-        if r_pim["referencia"] != "-":
-            linhas.append({
-                "Indicador": "Indústria (PIM-PF) – produção física",
-                "Mês ref.": r_pim["referencia"],
-                "Var. mensal": (
-                    f"{r_pim['var_mensal']:.1f}%"
-                    if pd.notna(r_pim["var_mensal"]) else "-"
-                ),
-                "Acum. no ano": (
-                    f"{r_pim['acum_ano']:.1f}%"
-                    if pd.notna(r_pim["acum_ano"]) else "-"
-                ),
-                "Acum. 12 meses": (
-                    f"{r_pim['acum_12m']:.1f}%"
-                    if pd.notna(r_pim["acum_12m"]) else "-"
-                ),
-                "Fonte": "IBGE / PIM-PF (SIDRA – Tabela 8888)",
-            })
-        else:
-            linhas.append({
-                "Indicador": "Indústria (PIM-PF) – produção física",
-                "Mês ref.": "-",
-                "Var. mensal": "sem dados",
-                "Acum. no ano": "-",
-                "Acum. 12 meses": "-",
-                "Fonte": "IBGE / PIM-PF (SIDRA – Tabela 8888)",
-            })
-    except Exception as e:
-        linhas.append({
-            "Indicador": "Indústria (PIM-PF) – produção física",
-            "Mês ref.": "-",
-            "Var. mensal": f"Erro: {e}",
-            "Acum. no ano": "-",
-            "Acum. 12 meses": "-",
-            "Fonte": "IBGE / PIM-PF (SIDRA – Tabela 8888)",
-        })
-
-    return pd.DataFrame(linhas)
-
-
-def montar_tabela_focus() -> pd.DataFrame:
-    ano_atual = date.today().year
-    prox_ano = ano_atual + 1
-
-    specs = [
-        {
-            "label": "IPCA (% a.a.)",
-            "indicador": "IPCA",
-            "tipo": "percent",
-            "detalhe": None,
-        },
-        {
-            "label": "PIB Total (% a.a.)",
-            "indicador": "PIB Total",
-            "tipo": "percent",
-            "detalhe": None,
-        },
-        {
-            "label": "Selic fim de ano (% a.a.)",
-            "indicador": "Meta para taxa over-selic",
-            "tipo": "percent",
-            "detalhe": "Fim do ano",
-        },
-        {
-            "label": "Câmbio fim de ano (R$/US$)",
-            "indicador": "Taxa de câmbio",
-            "tipo": "cambio",
-            "detalhe": "Fim do ano",
-        },
-    ]
-
-    linhas: List[Dict[str, str]] = []
-
-    for s in specs:
-        try:
-            v_atual = buscar_focus_expectativa_anual(
-                indicador=s["indicador"],
-                ano_ref=ano_atual,
-                indicador_detalhe=s["detalhe"],
-            )
-            v_prox = buscar_focus_expectativa_anual(
-                indicador=s["indicador"],
-                ano_ref=prox_ano,
-                indicador_detalhe=s["detalhe"],
-            )
-
-            linhas.append(
-                {
-                    "Indicador": s["label"],
-                    f"{ano_atual}": formatar_focus_valor(v_atual, s["tipo"]),
-                    f"{prox_ano}": formatar_focus_valor(v_prox, s["tipo"]),
-                    "Fonte": "BCB / Focus – Expectativas de Mercado Anuais",
-                }
-            )
-        except Exception as e:
-            linhas.append(
-                {
-                    "Indicador": s["label"],
-                    f"{ano_atual}": f"Erro: {e}",
-                    f"{prox_ano}": "-",
-                    "Fonte": "BCB / Focus – Expectativas de Mercado Anuais",
-                }
-            )
+    # INDÚSTRIA (PIM-PF) – placeholder
+    linhas.append({
+        "Indicador": "Indústria (PIM-PF) – produção física",
+        "Mês ref.": "-",
+        "Var. mensal": "em construção",
+        "Acum. no ano": "em construção",
+        "Acum. 12 meses": "em construção",
+        "Fonte": "IBGE / PIM-PF (SIDRA)",
+    })
 
     return pd.DataFrame(linhas)
 
@@ -1231,14 +884,13 @@ def main():
     )
 
     st.title("Indicadores Macro Brasil")
-    st.caption("Dados oficiais – IBGE (SIDRA), Banco Central (SGS) e Focus (BCB).")
+    st.caption("Foco em exatidão dos dados - IBGE (SIDRA) e Banco Central (SGS).")
 
     st.write("---")
 
     with st.spinner("Buscando dados mais recentes..."):
         df_infla = montar_tabela_inflacao()
         df_ativ = montar_tabela_atividade_economica()
-        df_focus = montar_tabela_focus()
         df_selic = montar_tabela_selic_meta()
         df_cdi = montar_tabela_cdi()
         df_ptax = montar_tabela_ptax()
@@ -1250,29 +902,12 @@ def main():
         width="stretch",
     )
 
-    st.write("---")
-
-    # EXPECTATIVAS DE MERCADO (FOCUS)
-    st.subheader("📈 Expectativas de Mercado (Focus)")
-    st.caption(
-        "Mediana das expectativas anuais para IPCA, PIB, Selic e câmbio – "
-        "ano corrente e próximo (BCB / Focus)."
-    )
-    st.dataframe(
-        df_focus.set_index("Indicador"),
-        width="stretch",
-    )
-
-    st.write("---")
-
     # ATIVIDADE ECONÔMICA
     st.subheader("🏭 Atividade Econômica (IBGE)")
     st.dataframe(
         df_ativ.set_index("Indicador"),
         width="stretch",
     )
-
-    st.write("---")
 
     # JUROS E CÂMBIO
     st.subheader("💰 Juros e Câmbio (Banco Central)")
@@ -1283,7 +918,7 @@ def main():
         width="stretch",
     )
 
-    st.markdown("**CDI – níveis e acumulados**")
+    st.markdown("**CDI diário – projeções (mantida a taxa de hoje)**")
     st.dataframe(
         df_cdi.set_index("Indicador"),
         width="stretch",
