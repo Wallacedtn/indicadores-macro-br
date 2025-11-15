@@ -1,0 +1,22 @@
+# Ambiente virtual
+.venv/
+venv/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# VS Code
+.vscode/
+.idea/
+
+# Logs
+*.log
+*.tmp
+
+# Arquivos temporários criados por Streamlit
+.streamlit/
+
+# Pastas que não precisam ir para o GitHub
+data/
