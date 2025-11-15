@@ -91,11 +91,6 @@ IBGE_VARIAVEL_IPCA15 = 355
 
 IBGE_NIVEL_BRASIL = "n1/all"  # nível Brasil
 
-# API OLINDA – EXPECTATIVAS FOCUS
-FOCUS_BASE_URL = (
-    "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata"
-)
-
 
 # =============================================================================
 # FUNÇÕES AUXILIARES DE DATA
@@ -679,53 +674,90 @@ def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 
 
 # =============================================================================
-# EXPECTATIVAS FOCUS
+# FOCUS – EXPECTATIVAS DE MERCADO (BCB / OLINDA)
 # =============================================================================
 
-def buscar_focus_expectativa_anual(indicador, detalhe, ano_desejado):
-    """Busca a mediana das expectativas anuais do Focus para um indicador específico."""
+def buscar_focus_expectativa_anual(indicador, ano_desejado, indicador_detalhe=None):
+    """
+    Busca a MEDIANA das expectativas anuais do Focus para um indicador específico e ano (ex: 2025).
+    Usa o endpoint oficial: ExpectativasMercadoAnuais.
+    """
     base_url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/"
-    
+    endpoint = "ExpectativasMercadoAnuais"
+
+    # Monta filtro OData
+    if indicador_detalhe:
+        # Ex.: Indicador eq 'Meta para taxa over-selic' and IndicadorDetalhe eq 'Fim do ano'
+        filtro = (
+            f"$filter=Indicador%20eq%20'{indicador}'%20and%20"
+            f"IndicadorDetalhe%20eq%20'{indicador_detalhe}'"
+        )
+    else:
+        # Ex.: Indicador eq 'IPCA'
+        filtro = f"$filter=Indicador%20eq%20'{indicador}'"
+
+    # Orderby=Data desc garante que o primeiro da lista seja o mais recente
     url = (
-        base_url +
-        "ExpectativasMercadoAnuais?"
-        "$top=50&$format=json&"
-        f"$filter=Indicador%20eq%20'{indicador}'%20and%20IndicadorDetalhe%20eq%20'{detalhe}'"
+        f"{base_url}{endpoint}?"
+        "$top=1000&$orderby=Data%20desc&$format=json&"
+        f"{filtro}"
     )
 
     try:
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        dados = r.json()["value"]
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        dados = resp.json().get("value", [])
 
-        # Filtra pelo ano desejado (ex: 2025)
+        # Filtra pelo ano de referência desejado (campo DataReferencia é '2025', '2026', etc.)
         dados_ano = [item for item in dados if item.get("DataReferencia") == str(ano_desejado)]
         if not dados_ano:
             return "-"
 
-        # Pega mediana
+        # Como ordenamos por Data desc, o primeiro já é o mais recente
         mediana = dados_ano[0].get("Mediana")
         if mediana is None:
             return "-"
 
-        return f"{mediana:.2f}"
+        return float(mediana)
 
-    except Exception as e:
-        return f"Erro: {e}"
-
-def formatar_focus_valor(valor: Optional[float], tipo: str) -> str:
-    """
-    tipo:
-      - 'percent' -> formata como 4.55%
-      - 'cambio'  -> formata como R$ 5.40
-    """
-    if valor is None:
+    except Exception:
         return "-"
 
-    if tipo == "cambio":
-        return f"R$ {valor:.2f}"
-    else:
-        return f"{valor:.2f}%"
+
+def montar_tabela_focus() -> pd.DataFrame:
+    """
+    Monta DataFrame com as principais expectativas anuais de mercado (Focus)
+    para o ano corrente e o próximo:
+      - IPCA (a.a.)
+      - PIB Total (var.%)
+      - Selic fim do ano (a.a.)
+      - Câmbio R$/US$ – fim do ano
+    """
+    ano_atual = datetime.now().year
+    anos = [ano_atual, ano_atual + 1]
+
+    # Configurações: (texto_da_linha, Indicador (API), IndicadorDetalhe (API ou None))
+    configs = [
+        ("IPCA (a.a.)", "IPCA", None),
+        ("PIB Total (var.% a.a.)", "PIB Total", None),
+        ("Selic fim do ano (a.a.)", "Meta para taxa over-selic", "Fim do ano"),
+        ("Câmbio fim do ano (R$/US$)", "Taxa de câmbio", "Fim do ano"),
+    ]
+
+    linhas: List[Dict[str, str]] = []
+    for nome_exibicao, indicador_api, detalhe_api in configs:
+        linha: Dict[str, str] = {"Indicador": nome_exibicao}
+        for ano in anos:
+            valor = buscar_focus_expectativa_anual(indicador_api, ano, detalhe_api)
+            if isinstance(valor, (int, float)):
+                linha[str(ano)] = f"{valor:.2f}"
+            else:
+                linha[str(ano)] = valor
+        linha["Fonte"] = "BCB / Focus – Expectativas de Mercado Anuais"
+        linhas.append(linha)
+
+    df = pd.DataFrame(linhas)
+    return df
 
 
 # =============================================================================
@@ -1126,30 +1158,6 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
         })
 
     return pd.DataFrame(linhas)
-
-
-def montar_tabela_focus():
-    ano_atual = datetime.now().year
-    anos = [ano_atual, ano_atual + 1]
-
-    indicadores = [
-        ("IPCA (a.a.)", "IPCA", "Índice cheio"),
-        ("PIB Total (var.%)", "PIB Total", "Var. %"),
-        ("Selic fim do ano (a.a.)", "Selic Meta", "Fim de período"),
-        ("Câmbio fim do ano (R$/US$)", "Câmbio", "R$/US$ - fim de período"),
-    ]
-
-    linhas = []
-    for nome_exibicao, indicador, detalhe in indicadores:
-        linha = {"Indicador": nome_exibicao}
-        for ano in anos:
-            valor = buscar_focus_expectativa_anual(indicador, detalhe, ano)
-            linha[str(ano)] = valor
-        linha["Fonte"] = "BCB / Focus – Expectativas de Mercado Anuais"
-        linhas.append(linha)
-
-    return linhas
-
 
 
 # =============================================================================
