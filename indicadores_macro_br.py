@@ -17,8 +17,8 @@ from functools import lru_cache
 
 def _get_with_retry(
     url: str,
-    max_attempts: int = 3,
-    timeout: int = 30,
+    max_attempts: int = 2,
+    timeout: int = 10,
 ) -> requests.Response:
     """
     Faz GET com poucas tentativas e timeout configurável.
@@ -141,7 +141,7 @@ def _buscar_serie_sgs_cached(
         f"?formato=json&dataInicial={data_inicial}&dataFinal={data_final}"
     )
 
-    resp = _get_with_retry(url, max_attempts=3, timeout=30)
+    resp = _get_with_retry(url)  # usa os defaults: 2 tentativas, 10s
     dados = resp.json()
 
     if not dados:
@@ -212,7 +212,7 @@ def _buscar_serie_mensal_ibge_cached(
         f"t/{tabela}/{nivel}/v/{variavel}/p/last60"
     )
 
-    resp = _get_with_retry(url, max_attempts=3, timeout=30)
+    resp = _get_with_retry(url)  # usa os defaults: 2 tentativas, 10s
     dados = resp.json()
 
     if not dados:
@@ -289,7 +289,7 @@ def _buscar_serie_sidra_valor_cached(url: str) -> pd.DataFrame:
     e devolve DataFrame ['data', 'valor'].
     Implementação com cache.
     """
-    resp = _get_with_retry(url, max_attempts=3, timeout=30)
+    resp = _get_with_retry(url)  # usa os defaults: 2 tentativas, 10s
     dados = resp.json()
 
     if not dados:
@@ -628,7 +628,7 @@ def _carregar_focus_raw() -> pd.DataFrame:
     )
 
     try:
-        resp = _get_with_retry(url, max_attempts=3, timeout=30)
+        resp = _get_with_retry(url)  # usa os defaults: 2 tentativas, 10s
         dados = resp.json().get("value", [])
     except Exception:
         return pd.DataFrame()
@@ -663,7 +663,7 @@ def _carregar_focus_top5_raw() -> pd.DataFrame:
     )
 
     try:
-        resp = _get_with_retry(url, max_attempts=3, timeout=30)
+        resp = _get_with_retry(url)  # usa os defaults: 2 tentativas, 10s
         dados = resp.json().get("value", [])
     except Exception:
         return pd.DataFrame()
@@ -766,8 +766,8 @@ def montar_tabela_focus() -> pd.DataFrame:
     configs = [
         ("IPCA (a.a.)", "ipca", None, True),
         ("PIB Total (var.% a.a.)", "pib total", None, True),
-        ("Selic (a.a., Focus)", "selic", None, False),
-        ("Câmbio (R$/US$, Focus)", "cambio", None, False),
+        ("Selic (a.a.)", "selic", None, False),
+        ("Câmbio (R$/US$)", "cambio", None, False),
     ]
 
     linhas: List[Dict[str, str]] = []
@@ -1231,6 +1231,205 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
 
     return pd.DataFrame(linhas)
 
+def render_bloco1_observatorio_mercado(
+    df_focus,
+    df_focus_top5,
+    df_selic,
+    df_cdi,
+    df_ptax,
+):
+    """
+    Estrutura:
+    - Aba "Brasil"
+        - Indicadores de curto prazo: Selic, CDI e PTAX
+        - Expectativas anuais: Focus (Mediana e Top5)
+    - Aba "Mundo"
+        - Indicadores globais de curto prazo — em construção
+        - Expectativas de mercado – Global — em construção
+    """
+
+
+
+    tab_br, tab_mundo = st.tabs(["Brasil", "Mundo"])
+
+    # ==========================
+    # ABA BRASIL
+    # ==========================
+    with tab_br:
+        subtab_indic_br, subtab_exp_br = st.tabs(
+            ["Curto prazo", "Expectativas"]
+        )
+
+        # -------- Indicadores BR --------
+        with subtab_indic_br:
+            st.markdown("### Indicadores de curto prazo – Brasil")
+            st.caption(
+                "Selic Meta, CDI acumulado e câmbio PTAX, com foco em horizonte de curto prazo."
+            )
+
+            st.markdown("**Taxa básica – Selic Meta**")
+            st.dataframe(
+                df_selic.set_index("Indicador"),
+                width="stretch",
+            )
+
+            st.markdown("**CDI – Retorno acumulado**")
+            st.dataframe(
+                df_cdi.set_index("Indicador"),
+                width="stretch",
+            )
+
+            st.markdown("**Câmbio – Dólar PTAX (venda)**")
+            st.dataframe(
+                df_ptax.set_index("Indicador"),
+                width="stretch",
+            )
+
+        # -------- Expectativas BR --------
+        with subtab_exp_br:
+            st.markdown("### Expectativas de mercado – Brasil (Focus)")
+            st.caption(
+                "Projeções anuais do Focus (mediana do mercado) e Focus Top5 (instituições mais assertivas)."
+            )
+
+            st.markdown("**Focus – Mediana**")
+            st.dataframe(
+                df_focus.set_index("Indicador"),
+                width="stretch",
+            )
+
+            st.markdown("**Focus – Top 5**")
+            st.dataframe(
+                df_focus_top5.set_index("Indicador"),
+                width="stretch",
+            )
+
+    # ==========================
+    # ABA MUNDO
+    # ==========================
+    with tab_mundo:
+        subtab_indic_world, subtab_exp_world = st.tabs(
+            ["Curto prazo", "Expectativas"]
+        )
+
+        # -------- Indicadores MUNDO --------
+        with subtab_indic_world:
+            st.markdown("### Indicadores de curto prazo – Global")
+            st.caption(
+                "Em construção: bolsas (EUA, Europa, Ásia), VIX, DXY, Treasuries, "
+                "commodities e CDS Brasil."
+            )
+            st.info(
+                "Aqui vamos adicionar: S&P, Nasdaq, Stoxx 600, índices asiáticos, "
+                "VIX, DXY, Treasuries 2y/5y/10y/30y, petróleo, minério, ouro e CDS Brasil."
+            )
+
+        # -------- Expectativas MUNDO --------
+        with subtab_exp_world:
+            st.markdown("### Expectativas de mercado – Global")
+            st.caption(
+                "Em construção: projeções de crescimento, inflação e juros em economias "
+                "avançadas e emergentes."
+            )
+            st.info(
+                "Aqui futuramente entram projeções do FMI/OCDE, Fed funds implícito, "
+                "inflacao esperada nos EUA/Europa etc."
+            )
+
+
+
+
+def render_bloco2_fiscal():
+    st.info(
+        "Em construção: resultado primário (12m), resultado nominal, juros nominais, "
+        "DBGG (% do PIB), DLSP (% do PIB) e NFSP (Tesouro / BCB)."
+    )
+
+
+def render_bloco3_setor_externo():
+    st.info(
+        "Em construção: exportações, importações, balança comercial, transações correntes, "
+        "conta financeira, renda primária/secundária e reservas internacionais."
+    )
+
+
+def render_bloco4_mercado_trabalho():
+    st.info(
+        "Em construção: PNAD Contínua (desemprego, ocupados, renda), CAGED e desemprego nos EUA."
+    )
+
+
+def render_bloco5_atividade(df_ativ: pd.DataFrame):
+
+    st.markdown("### Indicadores coincidentes (IBGE)")
+    st.caption("Varejo (PMC), Serviços (PMS) e Indústria (PIM-PF).")
+    st.dataframe(
+        df_ativ.set_index("Indicador"),
+        width="stretch",
+    )
+
+    st.info(
+        "⚙️ Em construção (parte avançada): IBC-Br, PIB trimestral e componentes do PIB."
+    )
+
+def render_bloco6_inflacao(df_infla: pd.DataFrame):
+
+    st.markdown("### IPCA e IPCA-15 – visão consolidada")
+    st.caption("Inflação cheia e IPCA-15: mensal, acumulado no ano e em 12 meses.")
+    st.dataframe(
+        df_infla.set_index("Indicador"),
+        width="stretch",
+    )
+
+    st.info(
+        "⚙️ Em construção: núcleos, difusão, IGPs, INCC e inflação internacional."
+    )
+
+
+def render_bloco7_credito_condicoes():
+    st.info(
+        "Em construção: inadimplência PF/PJ, concessões, spreads, estoque total, "
+        "crédito/PIB e índice de condições financeiras."
+    )
+
+# =============================================================================
+# WRAPPERS CACHEADOS (Streamlit) PARA AS TABELAS
+# =============================================================================
+
+@st.cache_data(ttl=60 * 30)  # 30 minutos
+def get_tabela_inflacao():
+    return montar_tabela_inflacao()
+
+
+@st.cache_data(ttl=60 * 30)
+def get_tabela_atividade():
+    return montar_tabela_atividade_economica()
+
+
+@st.cache_data(ttl=60 * 30)
+def get_tabela_focus():
+    return montar_tabela_focus()
+
+
+@st.cache_data(ttl=60 * 30)
+def get_tabela_focus_top5():
+    return montar_tabela_focus_top5()
+
+
+@st.cache_data(ttl=60 * 30)
+def get_tabela_selic():
+    return montar_tabela_selic_meta()
+
+
+@st.cache_data(ttl=60 * 30)
+def get_tabela_cdi():
+    return montar_tabela_cdi()
+
+
+@st.cache_data(ttl=60 * 30)
+def get_tabela_ptax():
+    return montar_tabela_ptax()
+
 
 # =============================================================================
 # STREAMLIT - INTERFACE
@@ -1238,87 +1437,69 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
 
 def main():
     st.set_page_config(
-        page_title="Indicadores Macro Brasil",
+        page_title="Observatório Macro",
         layout="wide",
     )
 
-    st.title("Indicadores Macro Brasil")
-    st.caption("Dados oficiais – IBGE (SIDRA), Banco Central (SGS) e Focus (BCB).")
+    st.title("Observatório Macro")
+    st.caption(
+        "Painel de conjuntura e inteligência macroeconômica – dados oficiais do IBGE, BCB e fontes internacionais."
+    )
 
     st.write("---")
 
     with st.spinner("Buscando dados mais recentes..."):
-        df_infla = montar_tabela_inflacao()
-        df_ativ = montar_tabela_atividade_economica()
-        df_focus = montar_tabela_focus()
-        df_focus_top5 = montar_tabela_focus_top5()
-        df_selic = montar_tabela_selic_meta()
-        df_cdi = montar_tabela_cdi()
-        df_ptax = montar_tabela_ptax()
+        df_infla = get_tabela_inflacao()
+        df_ativ = get_tabela_atividade()
+        df_focus = get_tabela_focus()
+        df_focus_top5 = get_tabela_focus_top5()
+        df_selic = get_tabela_selic()
+        df_cdi = get_tabela_cdi()
+        df_ptax = get_tabela_ptax()
 
 
-    # INFLAÇÃO
-    st.subheader("📊 Inflação (IBGE)")
-    st.dataframe(
-        df_infla.set_index("Indicador"),
-        width="stretch",
+    # ============================
+    # TABS DOS 7 BLOCOS MACRO
+    # ============================
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+        [
+            "🟦 Expectativas / Termômetros",
+            "🟥 Fiscal",
+            "🟩 Setor Externo",
+            "🟧 Mercado de Trabalho",
+            "🟪 Atividade Econômica",
+            "🟫 Inflação",
+            "⬛ Crédito & Condições",
+        ]
     )
 
-    st.write("---")
-
-    # EXPECTATIVAS DE MERCADO (FOCUS)
-    st.subheader("📈 Expectativas de Mercado (Focus)")
-    st.caption(
-        "Mediana das expectativas anuais para IPCA, PIB, Selic e câmbio – "
-        "ano corrente e próximo (BCB / Focus – Anuais)."
-    )
-    st.dataframe(
-        df_focus.set_index("Indicador"),
-        width="stretch",
-    )
-
-    st.subheader("🏅 Expectativas de Mercado – Top5 (Focus)")
-    st.caption(
-        "Mediana das expectativas anuais das 5 instituições que mais acertam "
-        "as projeções do Focus – ano corrente e próximo."
-    )
-    st.dataframe(
-        df_focus_top5.set_index("Indicador"),
-        width="stretch",
-    )
+    with tab1:
+        render_bloco1_observatorio_mercado(
+        df_focus=df_focus,
+        df_focus_top5=df_focus_top5,
+        df_selic=df_selic,
+        df_cdi=df_cdi,
+        df_ptax=df_ptax,
+        )
 
 
-    st.write("---")
+    with tab2:
+        render_bloco2_fiscal()
 
-    # ATIVIDADE ECONÔMICA
-    st.subheader("🏭 Atividade Econômica (IBGE)")
-    st.dataframe(
-        df_ativ.set_index("Indicador"),
-        width="stretch",
-    )
+    with tab3:
+        render_bloco3_setor_externo()
 
-    st.write("---")
+    with tab4:
+        render_bloco4_mercado_trabalho()
 
-    # JUROS E CÂMBIO
-    st.subheader("💰 Juros e Câmbio (Banco Central)")
+    with tab5:
+        render_bloco5_atividade(df_ativ=df_ativ)
 
-    st.markdown("**Taxa básica – Selic Meta**")
-    st.dataframe(
-        df_selic.set_index("Indicador"),
-        width="stretch",
-    )
+    with tab6:
+        render_bloco6_inflacao(df_infla=df_infla)
 
-    st.markdown("**CDI – níveis e acumulados**")
-    st.dataframe(
-        df_cdi.set_index("Indicador"),
-        width="stretch",
-    )
-
-    st.markdown("**Câmbio – Dólar PTAX (venda)**")
-    st.dataframe(
-        df_ptax.set_index("Indicador"),
-        width="stretch",
-    )
+    with tab7:
+        render_bloco7_credito_condicoes()
 
     st.write("---")
     st.caption(
