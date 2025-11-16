@@ -69,6 +69,11 @@ FOCUS_BASE_URL = (
     "Expectativas/versao/v1/odata/ExpectativasMercadoAnuais"
 )
 
+FOCUS_TOP5_ANUAIS_URL = (
+    "https://olinda.bcb.gov.br/olinda/servico/"
+    "Expectativas/versao/v1/odata/ExpectativasMercadoTop5Anuais"
+)
+
 
 # =============================================================================
 # FUNÇÕES AUXILIARES DE DATA
@@ -647,6 +652,39 @@ def _carregar_focus_raw() -> pd.DataFrame:
 
     return df
 
+@lru_cache(maxsize=1)
+def _carregar_focus_top5_raw() -> pd.DataFrame:
+    url = (
+        f"{FOCUS_TOP5_ANUAIS_URL}"
+        "?$top=5000"
+        "&$orderby=Data%20desc"
+        "&$format=json"
+        "&$select=Indicador,Data,DataReferencia,Mediana"
+    )
+
+    try:
+        resp = _get_with_retry(url, max_attempts=3, timeout=30)
+        dados = resp.json().get("value", [])
+    except Exception:
+        return pd.DataFrame()
+
+    if not dados:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(dados)
+
+    df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
+
+    df["ano_ref"] = df["DataReferencia"].astype(str).str[:4]
+    df = df[df["ano_ref"].str.isdigit()].copy()
+    df["ano_ref"] = df["ano_ref"].astype(int)
+
+    df["indicador_norm"] = df["Indicador"].apply(_normalizar_str)
+    # esse endpoint não tem IndicadorDetalhe, então deixamos vazio
+    df["detalhe_norm"] = ""
+
+    return df
+
 
 def buscar_focus_expectativa_anual(
     indicador_substr: str,
@@ -687,6 +725,36 @@ def buscar_focus_expectativa_anual(
         return "-"
 
 
+def buscar_focus_top5_expectativa_anual(
+    indicador_substr: str,
+    ano_desejado: int,
+    detalhe_substr: Optional[str] = None,
+):
+    df = _carregar_focus_top5_raw().copy()
+    if df.empty:
+        return "-"
+
+    mask = df["ano_ref"] == ano_desejado
+
+    ind_norm = _normalizar_str(indicador_substr)
+    mask &= df["indicador_norm"].str.contains(ind_norm, na=False)
+
+    if detalhe_substr:
+        det_norm = _normalizar_str(detalhe_substr)
+        mask &= df["detalhe_norm"].str.contains(det_norm, na=False)
+
+    df_f = df[mask]
+    if df_f.empty:
+        return "-"
+
+    df_f = df_f.sort_values("Data", ascending=False)
+    med = df_f.iloc[0].get("Mediana", None)
+
+    try:
+        return float(med)
+    except Exception:
+        return "-"
+
 def montar_tabela_focus() -> pd.DataFrame:
     """
     Monta a tabela de expectativas anuais para IPCA, PIB, Selic e câmbio
@@ -722,6 +790,46 @@ def montar_tabela_focus() -> pd.DataFrame:
         linhas.append(linha)
 
     return pd.DataFrame(linhas)
+
+def montar_tabela_focus_top5() -> pd.DataFrame:
+    """
+    Monta a tabela de expectativas anuais para IPCA, PIB, Selic e câmbio
+    usando o recurso ExpectativasMercadoAnuaisTop5 (Focus Top5).
+
+    Top5 = mediana das 5 instituições que mais acertam as projeções.
+    """
+    ano_atual = datetime.now().year
+    anos = [ano_atual, ano_atual + 1]
+
+    # mesmo conjunto de indicadores, mas com rótulo deixando claro que é Top5
+    configs = [
+        ("IPCA (a.a., Top5)", "ipca", None, True),
+        ("PIB Total (var.% a.a., Top5)", "pib total", None, True),
+        ("Selic (a.a., Top5)", "selic", None, False),
+        ("Câmbio (R$/US$, Top5)", "cambio", None, False),
+    ]
+
+    linhas: List[Dict[str, str]] = []
+
+    for nome_exibicao, indicador_sub, detalhe_sub, eh_percentual in configs:
+        linha: Dict[str, str] = {"Indicador": nome_exibicao}
+
+        for ano in anos:
+            valor = buscar_focus_top5_expectativa_anual(indicador_sub, ano, detalhe_sub)
+
+            if isinstance(valor, (int, float)):
+                if eh_percentual:
+                    linha[str(ano)] = f"{valor:.2f}%"
+                else:
+                    linha[str(ano)] = f"{valor:.2f}"
+            else:
+                linha[str(ano)] = valor
+
+        linha["Fonte"] = "BCB / Focus – Anuais Top5 (estatísticas)"
+        linhas.append(linha)
+
+    return pd.DataFrame(linhas)
+
 
 
 # =============================================================================
@@ -1143,9 +1251,11 @@ def main():
         df_infla = montar_tabela_inflacao()
         df_ativ = montar_tabela_atividade_economica()
         df_focus = montar_tabela_focus()
+        df_focus_top5 = montar_tabela_focus_top5()
         df_selic = montar_tabela_selic_meta()
         df_cdi = montar_tabela_cdi()
         df_ptax = montar_tabela_ptax()
+
 
     # INFLAÇÃO
     st.subheader("📊 Inflação (IBGE)")
@@ -1166,6 +1276,17 @@ def main():
         df_focus.set_index("Indicador"),
         width="stretch",
     )
+
+    st.subheader("🏅 Expectativas de Mercado – Top5 (Focus)")
+    st.caption(
+        "Mediana das expectativas anuais das 5 instituições que mais acertam "
+        "as projeções do Focus – ano corrente e próximo."
+    )
+    st.dataframe(
+        df_focus_top5.set_index("Indicador"),
+        width="stretch",
+    )
+
 
     st.write("---")
 
