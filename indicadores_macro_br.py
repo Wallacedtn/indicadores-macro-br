@@ -9,6 +9,11 @@ from dateutil.relativedelta import relativedelta
 import streamlit as st
 from typing import Optional, Dict, List
 from functools import lru_cache
+from curvas_anbima import (
+    atualizar_todas_as_curvas,
+    montar_curva_anbima_hoje,
+    montar_curva_anbima_variacoes,
+)
 
 # =============================================================================
 # HELPER DE REDE COM RETRY
@@ -74,10 +79,10 @@ FOCUS_TOP5_ANUAIS_URL = (
     "Expectativas/versao/v1/odata/ExpectativasMercadoTop5Anuais"
 )
 
-
 # =============================================================================
 # FUNÇÕES AUXILIARES DE DATA
 # =============================================================================
+
 
 def _hoje_str() -> str:
     """Data de hoje em dd/mm/aaaa (usado no BCB)."""
@@ -125,6 +130,7 @@ def _parse_periodo(p: str) -> pd.Timestamp:
 # =============================================================================
 # BANCO CENTRAL (SGS) – FUNÇÃO GENÉRICA COM CACHE + RETRY
 # =============================================================================
+
 
 @lru_cache(maxsize=32)
 def _buscar_serie_sgs_cached(
@@ -192,6 +198,7 @@ def buscar_ptax_venda() -> pd.DataFrame:
 # =============================================================================
 # IBGE / SIDRA GENÉRICO (IPCA, IPCA-15, etc.) COM CACHE + p/last60
 # =============================================================================
+
 
 @lru_cache(maxsize=64)
 def _buscar_serie_mensal_ibge_cached(
@@ -282,6 +289,7 @@ def buscar_ipca15_ibge() -> pd.DataFrame:
 # IBGE / SIDRA – HELPER GENÉRICO PARA PMC / PMS / PIM (com retry)
 # =============================================================================
 
+
 @lru_cache(maxsize=128)
 def _buscar_serie_sidra_valor_cached(url: str) -> pd.DataFrame:
     """
@@ -339,6 +347,7 @@ def _buscar_serie_sidra_valor(url: str) -> pd.DataFrame:
 # =============================================================================
 # ATIVIDADE ECONÔMICA – PMC / PMS / PIM
 # =============================================================================
+
 
 def buscar_pmc_var_mom_ajustada() -> pd.DataFrame:
     url = (
@@ -416,6 +425,7 @@ def buscar_pim_var_acum_12m() -> pd.DataFrame:
 # RESUMOS PMC / PMS / PIM
 # =============================================================================
 
+
 def _resumo_triple_series(
     df_mom: pd.DataFrame,
     df_ano: pd.DataFrame,
@@ -483,6 +493,7 @@ def resumo_pim_oficial() -> Dict[str, float]:
 # INFLAÇÃO – CÁLCULOS
 # =============================================================================
 
+
 def _acumula_percentuais(valores: pd.Series) -> float:
     if valores.empty:
         return float("nan")
@@ -529,6 +540,7 @@ def resumo_inflacao(df: pd.DataFrame) -> Dict[str, float]:
 # =============================================================================
 # CÂMBIO – RESUMO (níveis + variações)
 # =============================================================================
+
 
 def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
     if df.empty:
@@ -596,6 +608,7 @@ def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 # FOCUS – EXPECTATIVAS DE MERCADO (ANUAIS)
 # =============================================================================
 
+
 def _normalizar_str(s: str) -> str:
     if s is None:
         return ""
@@ -651,6 +664,7 @@ def _carregar_focus_raw() -> pd.DataFrame:
         df["detalhe_norm"] = ""
 
     return df
+
 
 @lru_cache(maxsize=1)
 def _carregar_focus_top5_raw() -> pd.DataFrame:
@@ -755,6 +769,7 @@ def buscar_focus_top5_expectativa_anual(
     except Exception:
         return "-"
 
+
 def montar_tabela_focus() -> pd.DataFrame:
     """
     Monta a tabela de expectativas anuais para IPCA, PIB, Selic e câmbio
@@ -790,6 +805,7 @@ def montar_tabela_focus() -> pd.DataFrame:
         linhas.append(linha)
 
     return pd.DataFrame(linhas)
+
 
 def montar_tabela_focus_top5() -> pd.DataFrame:
     """
@@ -831,10 +847,10 @@ def montar_tabela_focus_top5() -> pd.DataFrame:
     return pd.DataFrame(linhas)
 
 
-
 # =============================================================================
 # TABELAS RESUMO
 # =============================================================================
+
 
 def montar_tabela_inflacao() -> pd.DataFrame:
     linhas: List[Dict[str, str]] = []
@@ -1106,6 +1122,106 @@ def montar_tabela_ptax() -> pd.DataFrame:
     return pd.DataFrame(linhas)
 
 
+def montar_tabela_di_futuro() -> pd.DataFrame:
+    """
+    Curva de juros – DI Futuro (contrato DI1 na B3).
+
+    Usa a API pública leve da B3:
+        https://cotacao.b3.com.br/mds/api/v1/DerivativeQuotation/DI1
+
+    Retorna uma tabela com os principais vencimentos, taxa implícita
+    e contratos em aberto.
+    """
+    linhas: List[Dict[str, str]] = []
+
+    try:
+        url = "https://cotacao.b3.com.br/mds/api/v1/DerivativeQuotation/DI1"
+        resp = _get_with_retry(url, timeout=30)
+        data = resp.json()
+
+        contratos = data.get("Scty", [])
+        if not contratos:
+            raise ValueError("Resposta da B3 sem contratos DI1.")
+
+        rows = []
+        for c in contratos:
+            qtn = c.get("SctyQtn", {}) or {}
+            asset = c.get("asset", {}) or {}
+            summ = asset.get("AsstSummry", {}) or {}
+
+            symb = c.get("symb")
+            mtrty = summ.get("mtrtyCode")
+            cur = qtn.get("curPrc")
+            prev = qtn.get("prvsDayAdjstmntPric")
+
+            # Ignora contratos sem taxa ou vencimento
+            if symb is None or mtrty is None or cur is None:
+                continue
+
+            # variação em basis points (bps)
+            if prev is not None:
+                var_bps = (cur - prev) * 100
+            else:
+                var_bps = None
+
+            rows.append(
+                {
+                    "Contrato": symb,
+                    "Vencimento": mtrty,
+                    "Taxa (%)": cur,
+                    "Taxa dia ant. (%)": prev,
+                    "Variação (bps)": var_bps,
+                    "Contratos em aberto": summ.get("opnCtrcts"),
+                }
+            )
+
+        if not rows:
+            raise ValueError("Não há dados utilizáveis dos contratos DI1.")
+
+        df = pd.DataFrame(rows)
+
+        # Ordena por vencimento e pega só os primeiros (curva mais líquida)
+        df["Vencimento"] = pd.to_datetime(df["Vencimento"], errors="coerce")
+        df = df.dropna(subset=["Vencimento"]).sort_values("Vencimento")
+
+        # 4 contratos mais curtos
+        curtos = df.head(4)
+
+        # 4 contratos mais longos
+        longos = df.tail(4)
+        df = pd.concat([curtos, longos]).reset_index(drop=True)
+
+        # Formatação amigável para exibição
+        df["Vencimento"] = df["Vencimento"].dt.strftime("%d/%m/%Y")
+        df["Taxa (%)"] = df["Taxa (%)"].map(lambda x: f"{x:.3f}%")
+        df["Taxa dia ant. (%)"] = df["Taxa dia ant. (%)"].map(
+            lambda x: f"{x:.3f}%" if pd.notnull(x) else "-"
+        )
+
+        df["Variação (bps)"] = df["Variação (bps)"].map(
+            lambda x: f"{x:+.1f}" if pd.notnull(x) else "-"
+        )
+        df["Contratos em aberto"] = df["Contratos em aberto"].map(
+            lambda x: f"{int(x):,}".replace(",", ".") if pd.notnull(x) else "-"
+        )
+
+        return df
+
+    except Exception as e:
+        # Linha de fallback se der erro na API da B3
+        linhas.append(
+            {
+                "Contrato": "DI1 – curva",
+                "Vencimento": "-",
+                "Taxa (%)": "-",
+                "Taxa dia ant. (%)": "-",
+                "Variação (bps)": "-",
+                "Contratos em aberto": f"Erro ao consultar B3: {e}",
+            }
+        )
+        return pd.DataFrame(linhas)
+
+
 def montar_tabela_atividade_economica() -> pd.DataFrame:
     linhas: List[Dict[str, str]] = []
 
@@ -1240,24 +1356,29 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
 
     return pd.DataFrame(linhas)
 
+
 def render_bloco1_observatorio_mercado(
     df_focus,
     df_focus_top5,
     df_selic,
     df_cdi,
     df_ptax,
+    df_di_fut,
 ):
     """
     Estrutura:
     - Aba "Brasil"
-        - Indicadores de curto prazo: Selic, CDI e PTAX
-        - Expectativas anuais: Focus (Mediana e Top5)
+        - Sub-aba "Curto prazo":
+            - Selic Meta, CDI acumulado e câmbio PTAX
+            - Curva de juros – DI Futuro (B3)
+            - Curva de juros – ANBIMA (prefixado x IPCA+): juro nominal, real e breakeven
+        - Sub-aba "Expectativas":
+            - Focus – Mediana (consenso do mercado)
+            - Focus – Top 5 (instituições mais assertivas)
     - Aba "Mundo"
         - Indicadores globais de curto prazo — em construção
         - Expectativas de mercado – Global — em construção
     """
-
-
 
     tab_br, tab_mundo = st.tabs(["Brasil", "Mundo"])
 
@@ -1266,14 +1387,19 @@ def render_bloco1_observatorio_mercado(
     # ==========================
     with tab_br:
         subtab_indic_br, subtab_exp_br = st.tabs(
-            ["Curto prazo", "Expectativas"]
+            [
+                "Curto prazo",
+                "Expectativas",
+            ]
         )
 
-        # -------- Indicadores BR --------
+    # -------- Indicadores BR --------
         with subtab_indic_br:
             st.markdown("### Indicadores de curto prazo – Brasil")
             st.caption(
-                "Selic Meta, CDI acumulado e câmbio PTAX, com foco em horizonte de curto prazo."
+                "Selic Meta, CDI acumulado, câmbio PTAX e curvas de juros "
+                "(DI Futuro na B3 e ANBIMA prefixado x IPCA+), "
+                "com foco em leitura de curto e médio prazo."
             )
 
             st.markdown("**Taxa básica – Selic Meta**")
@@ -1294,20 +1420,98 @@ def render_bloco1_observatorio_mercado(
                 width="stretch",
             )
 
-        # -------- Expectativas BR --------
+            st.markdown("**Curva de juros – DI Futuro (B3)**")
+            st.caption(
+                "Principais vencimentos do contrato DI1, com taxa implícita anualizada "
+                "e variação em basis points."
+            )
+            st.dataframe(
+                df_di_fut.set_index("Contrato"),
+                width="stretch",
+            )
+
+            # -------------------------------
+            # Curva de juros – ANBIMA
+            # -------------------------------
+            st.markdown("### Curva de juros – ANBIMA (Prefixado x IPCA+)")
+            st.caption(
+                "Juro nominal, juro real e breakeven para vértices selecionados "
+                "com base nas curvas da ANBIMA (DI, prefixada e IPCA+), usando "
+                "histórico salvo localmente em CSV."
+            )
+
+            # Tenta atualizar as curvas do dia (não quebra o app se falhar)
+            try:
+                atualizar_todas_as_curvas()
+            except Exception as e:
+                st.warning(
+                    f"Não foi possível atualizar as curvas ANBIMA hoje: {e}"
+                )
+
+            df_curva_hoje = montar_curva_anbima_hoje()
+
+            if df_curva_hoje.empty:
+                st.info(
+                    "Ainda não há dados locais das curvas ANBIMA para hoje. "
+                    "Certifique-se de rodar o app em dia útil, após a "
+                    "divulgação das curvas pela ANBIMA, para começar a "
+                    "popular o histórico (arquivos em data/curvas_anbima)."
+                )
+            else:
+                st.markdown("**Níveis atuais por vértice (nominal, real e breakeven)**")
+                st.dataframe(
+                    df_curva_hoje.set_index("Vértice (anos)"),
+                    width="stretch",
+                )
+
+                st.markdown("**Abertura/fechamento por vértice – visão resumida**")
+                vertice = st.selectbox(
+                    "Selecione o vértice para análise de abertura/fechamento",
+                    options=[2, 5, 10, 20],
+                    index=2,
+                    format_func=lambda x: f"{x} anos",
+                )
+
+                df_var = montar_curva_anbima_variacoes(anos=vertice)
+
+                if df_var.empty:
+                    st.info(
+                        "Ainda não há histórico suficiente para esse vértice. "
+                        "Conforme o tempo passar, o painel vai acumulando "
+                        "observações diárias das curvas ANBIMA."
+                    )
+                else:
+                    st.dataframe(
+                        df_var.set_index("Data"),
+                        width="stretch",
+                    )
+                    st.caption(
+                        "Os níveis estão em % ao ano. A diferença entre as datas "
+                        "indica se a curva abriu ou fechou em cada horizonte "
+                        "(D-1, 1 semana, 1 mês, início do ano, 12 meses)."
+                    )
+
+    # -------- Expectativas BR --------
         with subtab_exp_br:
             st.markdown("### Expectativas de mercado – Brasil (Focus)")
             st.caption(
-                "Projeções anuais do Focus (mediana do mercado) e Focus Top5 (instituições mais assertivas)."
+                "Projeções anuais do Focus, com comparação entre o consenso (Mediana) "
+                "e o grupo das instituições mais assertivas (Top 5)."
             )
 
-            st.markdown("**Focus – Mediana**")
+            st.markdown("**Focus – Mediana (consenso do mercado)**")
+            st.caption(
+                "Mediana das projeções de todas as instituições participantes do boletim Focus."
+            )
             st.dataframe(
                 df_focus.set_index("Indicador"),
                 width="stretch",
             )
 
-            st.markdown("**Focus – Top 5**")
+            st.markdown("**Focus – Top 5 (instituições mais assertivas)**")
+            st.caption(
+                "Mediana das projeções das 5 instituições com melhor desempenho histórico no Focus."
+            )
             st.dataframe(
                 df_focus_top5.set_index("Indicador"),
                 width="stretch",
@@ -1342,10 +1546,8 @@ def render_bloco1_observatorio_mercado(
             )
             st.info(
                 "Aqui futuramente entram projeções do FMI/OCDE, Fed funds implícito, "
-                "inflacao esperada nos EUA/Europa etc."
+                "inflação esperada nos EUA/Europa etc."
             )
-
-
 
 
 def render_bloco2_fiscal():
@@ -1369,7 +1571,6 @@ def render_bloco4_mercado_trabalho():
 
 
 def render_bloco5_atividade(df_ativ: pd.DataFrame):
-
     st.markdown("### Atividade econômica – IBGE")
     st.caption(
         "Indicadores de volume de Varejo (PMC), Serviços (PMS) e Indústria (PIM-PF), "
@@ -1399,8 +1600,8 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
         "todos com a mesma lógica de classificação cíclica."
     )
 
-def render_bloco6_inflacao(df_infla: pd.DataFrame):
 
+def render_bloco6_inflacao(df_infla: pd.DataFrame):
     st.markdown("### IPCA e IPCA-15 – visão consolidada")
     st.caption("Inflação cheia e IPCA-15: mensal, acumulado no ano e em 12 meses.")
     st.dataframe(
@@ -1419,9 +1620,11 @@ def render_bloco7_credito_condicoes():
         "crédito/PIB e índice de condições financeiras."
     )
 
+
 # =============================================================================
 # WRAPPERS CACHEADOS (Streamlit) PARA AS TABELAS
 # =============================================================================
+
 
 @st.cache_data(ttl=60 * 30)  # 30 minutos
 def get_tabela_inflacao():
@@ -1458,9 +1661,15 @@ def get_tabela_ptax():
     return montar_tabela_ptax()
 
 
+@st.cache_data(ttl=60 * 10)
+def get_tabela_di_futuro():
+    return montar_tabela_di_futuro()
+
+
 # =============================================================================
 # STREAMLIT - INTERFACE
 # =============================================================================
+
 
 def main():
     st.set_page_config(
@@ -1483,7 +1692,7 @@ def main():
         df_selic = get_tabela_selic()
         df_cdi = get_tabela_cdi()
         df_ptax = get_tabela_ptax()
-
+        df_di_fut = get_tabela_di_futuro()
 
     # ============================
     # TABS DOS 7 BLOCOS MACRO
@@ -1502,13 +1711,13 @@ def main():
 
     with tab1:
         render_bloco1_observatorio_mercado(
-        df_focus=df_focus,
-        df_focus_top5=df_focus_top5,
-        df_selic=df_selic,
-        df_cdi=df_cdi,
-        df_ptax=df_ptax,
+            df_focus=df_focus,
+            df_focus_top5=df_focus_top5,
+            df_selic=df_selic,
+            df_cdi=df_cdi,
+            df_ptax=df_ptax,
+            df_di_fut=df_di_fut,
         )
-
 
     with tab2:
         render_bloco2_fiscal()
