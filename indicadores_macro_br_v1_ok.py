@@ -3,6 +3,7 @@
 
 import requests
 import pandas as pd
+import unicodedata
 from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 import streamlit as st
@@ -12,6 +13,7 @@ from functools import lru_cache
 # =============================================================================
 # HELPER DE REDE COM RETRY
 # =============================================================================
+
 
 def _get_with_retry(
     url: str,
@@ -44,37 +46,7 @@ def _get_with_retry(
 
 
 # =============================================================================
-# INDICADORES QUE ESTE APP ACOMPANHA
-# =============================================================================
-# INFLAÇÃO / PREÇOS (IBGE / SIDRA)
-# - IPCA (variação mensal)      -> tabela 1737, v=63
-# - IPCA-15 (variação mensal)   -> tabela 3065, v=355
-#
-# JUROS / CÂMBIO (BCB / SGS)
-# - Selic Meta (% a.a.)         -> série 432
-# - CDI diário (% a.d.)         -> série 12
-# - Dólar PTAX - venda (R$/US$) -> série 10813
-#
-# ATIVIDADE ECONÔMICA (IBGE)
-# - Varejo (PMC) – volume (tabela 8880, varejo restrito, Brasil):
-#       v/11708 -> variação M/M-1 com ajuste sazonal
-#       v/11710 -> variação acumulada no ano
-#       v/11711 -> variação acumulada em 12 meses
-#
-# - Serviços (PMS) – volume (tabela 5906, Brasil):
-#       v/11623 -> variação M/M-1 com ajuste sazonal
-#       v/11625 -> variação acumulada no ano
-#       v/11626 -> variação acumulada em 12 meses
-#
-# - Indústria (PIM-PF) – volume (tabela 8888, Brasil, Indústria Geral):
-#       v/11601 -> variação M/M-1 com ajuste sazonal
-#       v/11603 -> variação acumulada no ano
-#       v/11604 -> variação acumulada em 12 meses
-# =============================================================================
-
-
-# =============================================================================
-# CONFIGURAÇÕES BÁSICAS
+# CONFIGURAÇÕES DE SÉRIES
 # =============================================================================
 
 SGS_SERIES = {
@@ -90,6 +62,12 @@ IBGE_TABELA_IPCA15 = 3065
 IBGE_VARIAVEL_IPCA15 = 355
 
 IBGE_NIVEL_BRASIL = "n1/all"  # nível Brasil
+
+# FOCUS – endpoint definitivo (ExpectativasMercadoAnuais)
+FOCUS_BASE_URL = (
+    "https://olinda.bcb.gov.br/olinda/servico/"
+    "Expectativas/versao/v1/odata/ExpectativasMercadoAnuais"
+)
 
 
 # =============================================================================
@@ -358,11 +336,6 @@ def _buscar_serie_sidra_valor(url: str) -> pd.DataFrame:
 # =============================================================================
 
 def buscar_pmc_var_mom_ajustada() -> pd.DataFrame:
-    """
-    PMC - Variação mês/mês imediatamente anterior,
-    com ajuste sazonal (M/M-1), volume de vendas no
-    comércio varejista (restrito), Brasil.
-    """
     url = (
         "https://apisidra.ibge.gov.br/values/"
         "t/8880/n1/all/v/11708/p/last60/c11046/56734/d/v11708%201"
@@ -371,11 +344,6 @@ def buscar_pmc_var_mom_ajustada() -> pd.DataFrame:
 
 
 def buscar_pmc_var_acum_ano() -> pd.DataFrame:
-    """
-    PMC - Variação acumulada no ano (em relação ao mesmo
-    período do ano anterior), volume de vendas, varejo
-    restrito, Brasil.
-    """
     url = (
         "https://apisidra.ibge.gov.br/values/"
         "t/8880/n1/all/v/11710/p/last60/c11046/56734/d/v11710%201"
@@ -384,11 +352,6 @@ def buscar_pmc_var_acum_ano() -> pd.DataFrame:
 
 
 def buscar_pmc_var_acum_12m() -> pd.DataFrame:
-    """
-    PMC - Variação acumulada em 12 meses (em relação ao
-    período anterior de 12 meses), volume de vendas,
-    varejo restrito, Brasil.
-    """
     url = (
         "https://apisidra.ibge.gov.br/values/"
         "t/8880/n1/all/v/11711/p/last60/c11046/56734/d/v11711%201"
@@ -397,10 +360,6 @@ def buscar_pmc_var_acum_12m() -> pd.DataFrame:
 
 
 def buscar_pms_var_mom_ajustada() -> pd.DataFrame:
-    """
-    PMS - Variação mês/mês imediatamente anterior, com ajuste sazonal (M/M-1),
-    índice de volume de serviços, Brasil.
-    """
     url = (
         "https://apisidra.ibge.gov.br/values/"
         "t/5906/n1/all/v/11623/p/last60/c11046/56726/d/v11623%201"
@@ -409,10 +368,6 @@ def buscar_pms_var_mom_ajustada() -> pd.DataFrame:
 
 
 def buscar_pms_var_acum_ano() -> pd.DataFrame:
-    """
-    PMS - Variação acumulada no ano,
-    índice de volume de serviços, Brasil.
-    """
     url = (
         "https://apisidra.ibge.gov.br/values/"
         "t/5906/n1/all/v/11625/p/last60/c11046/56726/d/v11625%201"
@@ -421,10 +376,6 @@ def buscar_pms_var_acum_ano() -> pd.DataFrame:
 
 
 def buscar_pms_var_acum_12m() -> pd.DataFrame:
-    """
-    PMS - Variação acumulada em 12 meses,
-    índice de volume de serviços, Brasil.
-    """
     url = (
         "https://apisidra.ibge.gov.br/values/"
         "t/5906/n1/all/v/11626/p/last60/c11046/56726/d/v11626%201"
@@ -433,10 +384,6 @@ def buscar_pms_var_acum_12m() -> pd.DataFrame:
 
 
 def buscar_pim_var_mom_ajustada() -> pd.DataFrame:
-    """
-    PIM-PF – Variação mês/mês imediatamente anterior (%), com ajuste sazonal.
-    Fonte oficial: tabela 8888, variável 11601, Brasil, Indústria Geral.
-    """
     url = (
         "https://apisidra.ibge.gov.br/values/"
         "t/8888/n1/all/v/11601/p/last60/c544/129314/d/v11601%201"
@@ -445,10 +392,6 @@ def buscar_pim_var_mom_ajustada() -> pd.DataFrame:
 
 
 def buscar_pim_var_acum_ano() -> pd.DataFrame:
-    """
-    PIM-PF – Variação acumulada no ano (%).
-    Fonte: tabela 8888, variável 11603.
-    """
     url = (
         "https://apisidra.ibge.gov.br/values/"
         "t/8888/n1/all/v/11603/p/last60/c544/129314/d/v11603%201"
@@ -457,10 +400,6 @@ def buscar_pim_var_acum_ano() -> pd.DataFrame:
 
 
 def buscar_pim_var_acum_12m() -> pd.DataFrame:
-    """
-    PIM-PF – Variação acumulada em 12 meses (%).
-    Fonte: tabela 8888, variável 11604.
-    """
     url = (
         "https://apisidra.ibge.gov.br/values/"
         "t/8888/n1/all/v/11604/p/last60/c544/129314/d/v11604%201"
@@ -477,7 +416,6 @@ def _resumo_triple_series(
     df_ano: pd.DataFrame,
     df_12: pd.DataFrame
 ) -> Dict[str, float]:
-    """Helper reutilizado por PMC, PMS e PIM-PF."""
     if df_mom.empty and df_ano.empty and df_12.empty:
         return {
             "referencia": "-",
@@ -516,7 +454,6 @@ def _resumo_triple_series(
 
 
 def resumo_pmc_oficial() -> Dict[str, float]:
-    """Resumo oficial do varejo (PMC) – volume."""
     df_mom = buscar_pmc_var_mom_ajustada()
     df_ano = buscar_pmc_var_acum_ano()
     df_12 = buscar_pmc_var_acum_12m()
@@ -524,7 +461,6 @@ def resumo_pmc_oficial() -> Dict[str, float]:
 
 
 def resumo_pms_oficial() -> Dict[str, float]:
-    """Resumo oficial dos serviços (PMS) – volume."""
     df_mom = buscar_pms_var_mom_ajustada()
     df_ano = buscar_pms_var_acum_ano()
     df_12 = buscar_pms_var_acum_12m()
@@ -532,7 +468,6 @@ def resumo_pms_oficial() -> Dict[str, float]:
 
 
 def resumo_pim_oficial() -> Dict[str, float]:
-    """Resumo da indústria (PIM-PF) – produção física."""
     df_mom = buscar_pim_var_mom_ajustada()
     df_ano = buscar_pim_var_acum_ano()
     df_12 = buscar_pim_var_acum_12m()
@@ -544,9 +479,6 @@ def resumo_pim_oficial() -> Dict[str, float]:
 # =============================================================================
 
 def _acumula_percentuais(valores: pd.Series) -> float:
-    """
-    Recebe uma série de variações mensais em % e retorna o acumulado composto.
-    """
     if valores.empty:
         return float("nan")
     fator = (1 + valores / 100).prod()
@@ -554,13 +486,6 @@ def _acumula_percentuais(valores: pd.Series) -> float:
 
 
 def resumo_inflacao(df: pd.DataFrame) -> Dict[str, float]:
-    """
-    A partir de um DataFrame de inflação mensal (%), calcula:
-    - mês de referência
-    - última variação mensal
-    - acumulado no ano
-    - acumulado em 12 meses
-    """
     if df.empty:
         return {
             "referencia": "-",
@@ -572,7 +497,7 @@ def resumo_inflacao(df: pd.DataFrame) -> Dict[str, float]:
     df = df.sort_values("data").reset_index(drop=True)
     ult = df.iloc[-1]
     ref_mes = _formata_mes(ult["data"])
-    ultimo_valor = ult["valor"]  # já em %
+    ultimo_valor = ult["valor"]
 
     ano_ref = ult["data"].year
     df_ano = df[df["data"].dt.year == ano_ref]
@@ -601,14 +526,6 @@ def resumo_inflacao(df: pd.DataFrame) -> Dict[str, float]:
 # =============================================================================
 
 def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
-    """
-    Para o câmbio (PTAX, em R$/US$), calcula:
-    - último valor (cotação atual)
-    - valor há 12 meses e 24 meses
-    - variação no ano (%)
-    - variação em 12 meses (%)
-    - variação em 24 meses (%)
-    """
     if df.empty:
         return {
             "ultimo": None,
@@ -627,7 +544,6 @@ def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
     ultima_data = ult["data"]
     ultimo_valor = ult["valor"]
 
-    # Variação no ano (YTD)
     ano_ref = ultima_data.year
     df_ano = df[df["data"].dt.year == ano_ref]
     if not df_ano.empty:
@@ -636,7 +552,6 @@ def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
     else:
         var_ano = None
 
-    # Há 12 meses
     corte_12m = ultima_data - relativedelta(years=1)
     df_12m = df[df["data"] >= corte_12m]
     if not df_12m.empty:
@@ -648,7 +563,6 @@ def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
         data_12m = None
         var_12m = None
 
-    # Há 24 meses
     corte_24m = ultima_data - relativedelta(years=2)
     df_24m = df[df["data"] >= corte_24m]
     if not df_24m.empty:
@@ -674,90 +588,140 @@ def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 
 
 # =============================================================================
-# FOCUS – EXPECTATIVAS DE MERCADO (BCB / OLINDA)
+# FOCUS – EXPECTATIVAS DE MERCADO (ANUAIS)
 # =============================================================================
 
-def buscar_focus_expectativa_anual(indicador, ano_desejado, indicador_detalhe=None):
-    """
-    Busca a MEDIANA das expectativas anuais do Focus para um indicador específico e ano (ex: 2025).
-    Usa o endpoint oficial: ExpectativasMercadoAnuais.
-    """
-    base_url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/"
-    endpoint = "ExpectativasMercadoAnuais"
+def _normalizar_str(s: str) -> str:
+    if s is None:
+        return ""
+    if not isinstance(s, str):
+        s = str(s)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return s.lower()
 
-    # Monta filtro OData
-    if indicador_detalhe:
-        # Ex.: Indicador eq 'Meta para taxa over-selic' and IndicadorDetalhe eq 'Fim do ano'
-        filtro = (
-            f"$filter=Indicador%20eq%20'{indicador}'%20and%20"
-            f"IndicadorDetalhe%20eq%20'{indicador_detalhe}'"
-        )
-    else:
-        # Ex.: Indicador eq 'IPCA'
-        filtro = f"$filter=Indicador%20eq%20'{indicador}'"
 
-    # Orderby=Data desc garante que o primeiro da lista seja o mais recente
+@lru_cache(maxsize=1)
+def _carregar_focus_raw() -> pd.DataFrame:
+    """
+    Carrega o dataset de Expectativas de Mercado Anuais (estatísticas)
+    e prepara um DataFrame com:
+
+      - Indicador
+      - IndicadorDetalhe
+      - Data           (quando a expectativa foi registrada)
+      - DataReferencia (ano de referência, ex: 2025)
+      - ano_ref        (int)
+      - Mediana        (float)
+    """
     url = (
-        f"{base_url}{endpoint}?"
-        "$top=1000&$orderby=Data%20desc&$format=json&"
-        f"{filtro}"
+        f"{FOCUS_BASE_URL}"
+        "?$top=5000"
+        "&$orderby=Data%20desc"
+        "&$format=json"
+        "&$select=Indicador,IndicadorDetalhe,Data,DataReferencia,Mediana"
     )
 
     try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
+        resp = _get_with_retry(url, max_attempts=3, timeout=30)
         dados = resp.json().get("value", [])
+    except Exception:
+        return pd.DataFrame()
 
-        # Filtra pelo ano de referência desejado (campo DataReferencia é '2025', '2026', etc.)
-        dados_ano = [item for item in dados if item.get("DataReferencia") == str(ano_desejado)]
-        if not dados_ano:
-            return "-"
+    if not dados:
+        return pd.DataFrame()
 
-        # Como ordenamos por Data desc, o primeiro já é o mais recente
-        mediana = dados_ano[0].get("Mediana")
-        if mediana is None:
-            return "-"
+    df = pd.DataFrame(dados)
 
-        return float(mediana)
+    df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
 
+    df["ano_ref"] = df["DataReferencia"].astype(str).str[:4]
+    df = df[df["ano_ref"].str.isdigit()].copy()
+    df["ano_ref"] = df["ano_ref"].astype(int)
+
+    df["indicador_norm"] = df["Indicador"].apply(_normalizar_str)
+    if "IndicadorDetalhe" in df.columns:
+        df["detalhe_norm"] = df["IndicadorDetalhe"].apply(_normalizar_str)
+    else:
+        df["detalhe_norm"] = ""
+
+    return df
+
+
+def buscar_focus_expectativa_anual(
+    indicador_substr: str,
+    ano_desejado: int,
+    detalhe_substr: Optional[str] = None,
+):
+    """
+    Busca a mediana mais recente do Focus para um dado indicador e ano.
+    Ex.:
+      indicador_substr = "ipca"
+      indicador_substr = "pib total"
+      indicador_substr = "selic"
+      indicador_substr = "cambio"
+    """
+    df = _carregar_focus_raw().copy()
+    if df.empty:
+        return "-"
+
+    mask = df["ano_ref"] == ano_desejado
+
+    ind_norm = _normalizar_str(indicador_substr)
+    mask &= df["indicador_norm"].str.contains(ind_norm, na=False)
+
+    if detalhe_substr:
+        det_norm = _normalizar_str(detalhe_substr)
+        mask &= df["detalhe_norm"].str.contains(det_norm, na=False)
+
+    df_f = df[mask]
+    if df_f.empty:
+        return "-"
+
+    df_f = df_f.sort_values("Data", ascending=False)
+    med = df_f.iloc[0].get("Mediana", None)
+
+    try:
+        return float(med)
     except Exception:
         return "-"
 
 
 def montar_tabela_focus() -> pd.DataFrame:
     """
-    Monta DataFrame com as principais expectativas anuais de mercado (Focus)
-    para o ano corrente e o próximo:
-      - IPCA (a.a.)
-      - PIB Total (var.%)
-      - Selic fim do ano (a.a.)
-      - Câmbio R$/US$ – fim do ano
+    Monta a tabela de expectativas anuais para IPCA, PIB, Selic e câmbio
+    usando o recurso ExpectativasMercadoAnuais.
     """
     ano_atual = datetime.now().year
     anos = [ano_atual, ano_atual + 1]
 
-    # Configurações: (texto_da_linha, Indicador (API), IndicadorDetalhe (API ou None))
     configs = [
-        ("IPCA (a.a.)", "IPCA", None),
-        ("PIB Total (var.% a.a.)", "PIB Total", None),
-        ("Selic fim do ano (a.a.)", "Meta para taxa over-selic", "Fim do ano"),
-        ("Câmbio fim do ano (R$/US$)", "Taxa de câmbio", "Fim do ano"),
+        ("IPCA (a.a.)", "ipca", None, True),
+        ("PIB Total (var.% a.a.)", "pib total", None, True),
+        ("Selic (a.a., Focus)", "selic", None, False),
+        ("Câmbio (R$/US$, Focus)", "cambio", None, False),
     ]
 
     linhas: List[Dict[str, str]] = []
-    for nome_exibicao, indicador_api, detalhe_api in configs:
+
+    for nome_exibicao, indicador_sub, detalhe_sub, eh_percentual in configs:
         linha: Dict[str, str] = {"Indicador": nome_exibicao}
+
         for ano in anos:
-            valor = buscar_focus_expectativa_anual(indicador_api, ano, detalhe_api)
+            valor = buscar_focus_expectativa_anual(indicador_sub, ano, detalhe_sub)
+
             if isinstance(valor, (int, float)):
-                linha[str(ano)] = f"{valor:.2f}"
+                if eh_percentual:
+                    linha[str(ano)] = f"{valor:.2f}%"
+                else:
+                    linha[str(ano)] = f"{valor:.2f}"
             else:
                 linha[str(ano)] = valor
+
         linha["Fonte"] = "BCB / Focus – Expectativas de Mercado Anuais"
         linhas.append(linha)
 
-    df = pd.DataFrame(linhas)
-    return df
+    return pd.DataFrame(linhas)
 
 
 # =============================================================================
@@ -1196,7 +1160,7 @@ def main():
     st.subheader("📈 Expectativas de Mercado (Focus)")
     st.caption(
         "Mediana das expectativas anuais para IPCA, PIB, Selic e câmbio – "
-        "ano corrente e próximo (BCB / Focus)."
+        "ano corrente e próximo (BCB / Focus – Anuais)."
     )
     st.dataframe(
         df_focus.set_index("Indicador"),
