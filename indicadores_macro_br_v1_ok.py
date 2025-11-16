@@ -1109,12 +1109,13 @@ def montar_tabela_ptax() -> pd.DataFrame:
 def montar_tabela_atividade_economica() -> pd.DataFrame:
     linhas: List[Dict[str, str]] = []
 
-    # Varejo
+    # Varejo (PMC) – COINCIDENTE
     try:
         r_pmc = resumo_pmc_oficial()
         if r_pmc["referencia"] != "-":
             linhas.append({
                 "Indicador": "Varejo (PMC) – volume",
+                "Classificação": "🟡 Coincidente",
                 "Mês ref.": r_pmc["referencia"],
                 "Var. mensal": (
                     f"{r_pmc['var_mensal']:.1f}%"
@@ -1133,6 +1134,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
         else:
             linhas.append({
                 "Indicador": "Varejo (PMC) – volume",
+                "Classificação": "🟡 Coincidente",
                 "Mês ref.": "-",
                 "Var. mensal": "sem dados",
                 "Acum. no ano": "-",
@@ -1142,6 +1144,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
     except Exception as e:
         linhas.append({
             "Indicador": "Varejo (PMC) – volume",
+            "Classificação": "🟡 Coincidente",
             "Mês ref.": "-",
             "Var. mensal": f"Erro: {e}",
             "Acum. no ano": "-",
@@ -1149,12 +1152,13 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
             "Fonte": "IBGE / PMC (SIDRA – Tabela 8880)",
         })
 
-    # Serviços
+    # Serviços (PMS) – COINCIDENTE
     try:
         r_pms = resumo_pms_oficial()
         if r_pms["referencia"] != "-":
             linhas.append({
                 "Indicador": "Serviços (PMS) – volume",
+                "Classificação": "🟡 Coincidente",
                 "Mês ref.": r_pms["referencia"],
                 "Var. mensal": (
                     f"{r_pms['var_mensal']:.1f}%"
@@ -1173,6 +1177,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
         else:
             linhas.append({
                 "Indicador": "Serviços (PMS) – volume",
+                "Classificação": "🟡 Coincidente",
                 "Mês ref.": "-",
                 "Var. mensal": "sem dados",
                 "Acum. no ano": "-",
@@ -1182,6 +1187,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
     except Exception as e:
         linhas.append({
             "Indicador": "Serviços (PMS) – volume",
+            "Classificação": "🟡 Coincidente",
             "Mês ref.": "-",
             "Var. mensal": f"Erro: {e}",
             "Acum. no ano": "-",
@@ -1189,12 +1195,13 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
             "Fonte": "IBGE / PMS (SIDRA – Tabela 5906)",
         })
 
-    # Indústria
+    # Indústria (PIM-PF) – COINCIDENTE
     try:
         r_pim = resumo_pim_oficial()
         if r_pim["referencia"] != "-":
             linhas.append({
                 "Indicador": "Indústria (PIM-PF) – produção física",
+                "Classificação": "🟡 Coincidente",
                 "Mês ref.": r_pim["referencia"],
                 "Var. mensal": (
                     f"{r_pim['var_mensal']:.1f}%"
@@ -1213,6 +1220,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
         else:
             linhas.append({
                 "Indicador": "Indústria (PIM-PF) – produção física",
+                "Classificação": "🟡 Coincidente",
                 "Mês ref.": "-",
                 "Var. mensal": "sem dados",
                 "Acum. no ano": "-",
@@ -1222,6 +1230,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
     except Exception as e:
         linhas.append({
             "Indicador": "Indústria (PIM-PF) – produção física",
+            "Classificação": "🟡 Coincidente",
             "Mês ref.": "-",
             "Var. mensal": f"Erro: {e}",
             "Acum. no ano": "-",
@@ -1361,15 +1370,33 @@ def render_bloco4_mercado_trabalho():
 
 def render_bloco5_atividade(df_ativ: pd.DataFrame):
 
-    st.markdown("### Indicadores coincidentes (IBGE)")
-    st.caption("Varejo (PMC), Serviços (PMS) e Indústria (PIM-PF).")
+    st.markdown("### Atividade econômica – IBGE")
+    st.caption(
+        "Indicadores de volume de Varejo (PMC), Serviços (PMS) e Indústria (PIM-PF), "
+        "classificados como indicadores coincidentes do ciclo econômico."
+    )
+
+    # Filtro de classificação cíclica
+    filtro = st.selectbox(
+        "Classificação cíclica dos indicadores",
+        ["Todos", "Coincidentes"],
+        index=1,
+    )
+
+    df_exibir = df_ativ.copy()
+
+    if filtro == "Coincidentes":
+        df_exibir = df_exibir[df_exibir["Classificação"].str.contains("Coincidente")]
+
     st.dataframe(
-        df_ativ.set_index("Indicador"),
+        df_exibir.set_index(["Indicador", "Classificação"]),
         width="stretch",
     )
 
     st.info(
-        "⚙️ Em construção (parte avançada): IBC-Br, PIB trimestral e componentes do PIB."
+        "⚙️ Em construção (parte avançada): inclusão de indicadores antecedentes "
+        "(PMI, confiança FGV) e defasados (desemprego, massa salarial), "
+        "todos com a mesma lógica de classificação cíclica."
     )
 
 def render_bloco6_inflacao(df_infla: pd.DataFrame):
