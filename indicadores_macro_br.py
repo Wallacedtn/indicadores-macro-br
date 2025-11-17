@@ -14,10 +14,34 @@ from curvas_anbima import (
     montar_curva_anbima_hoje,
     montar_curva_anbima_variacoes,
 )
+from di_futuro_b3 import (
+    atualizar_historico_di_futuro,
+    carregar_historico_di_futuro,
+)
+
 
 # =============================================================================
 # HELPER DE REDE COM RETRY
 # =============================================================================
+
+
+def atualizar_dados_externos():
+    """
+    Atualiza os dados que ficam salvos em CSV fora do app principal:
+    - Curvas ANBIMA (prefixada, DI, IPCA+)
+    - Histórico dos contratos DI Futuro (B3)
+    """
+    # Atualiza curvas ANBIMA
+    try:
+        atualizar_todas_as_curvas()
+    except Exception as e:
+        st.warning(f"Não foi possível atualizar curvas ANBIMA: {e}")
+
+    # Atualiza histórico DI Futuro B3
+    try:
+        atualizar_historico_di_futuro()
+    except Exception as e:
+        st.warning(f"Não foi possível atualizar histórico DI Futuro B3: {e}")
 
 
 def _get_with_retry(
@@ -61,7 +85,7 @@ SGS_SERIES = {
 }
 
 IBGE_TABELA_IPCA = 1737
-IBGE_VARIAVEL_IPCA = 63   # variação mensal (%)
+IBGE_VARIAVEL_IPCA = 63  # variação mensal (%)
 
 IBGE_TABELA_IPCA15 = 3065
 IBGE_VARIAVEL_IPCA15 = 355
@@ -155,7 +179,10 @@ def _buscar_serie_sgs_cached(
 
     df = pd.DataFrame(dados)
     df["data"] = pd.to_datetime(df["data"], format="%d/%m/%Y")
-    df["valor"] = pd.to_numeric(df["valor"].astype(str).str.replace(",", "."), errors="coerce")
+    df["valor"] = pd.to_numeric(
+        df["valor"].astype(str).str.replace(",", "."),
+        errors="coerce",
+    )
     df = df.sort_values("data").reset_index(drop=True)
     return df
 
@@ -163,7 +190,7 @@ def _buscar_serie_sgs_cached(
 def buscar_serie_sgs(
     codigo: int,
     data_inicial: Optional[str] = None,
-    data_final: Optional[str] = None
+    data_final: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Busca série temporal na API SGS do Banco Central.
@@ -233,7 +260,10 @@ def _buscar_serie_mensal_ibge_cached(
     col_periodo = None
     for col in df.columns:
         titulo = str(header.get(col, "")).lower()
-        if any(p in titulo for p in ["mês (código)", "mes (código)", "mês", "mes", "período", "periodo"]):
+        if any(
+            p in titulo
+            for p in ["mês (código)", "mes (código)", "mês", "mes", "período", "periodo"]
+        ):
             col_periodo = col
             break
 
@@ -250,7 +280,7 @@ def _buscar_serie_mensal_ibge_cached(
     df["data"] = df[col_periodo].apply(_parse_periodo)
     df["valor"] = pd.to_numeric(
         df[col_valor].astype(str).str.replace(",", "."),
-        errors="coerce"
+        errors="coerce",
     )
 
     df = (
@@ -266,7 +296,7 @@ def _buscar_serie_mensal_ibge_cached(
 def buscar_serie_mensal_ibge(
     tabela: int,
     variavel: int,
-    nivel: str = IBGE_NIVEL_BRASIL
+    nivel: str = IBGE_NIVEL_BRASIL,
 ) -> pd.DataFrame:
     """
     Busca uma série mensal simples na API SIDRA do IBGE.
@@ -311,7 +341,10 @@ def _buscar_serie_sidra_valor_cached(url: str) -> pd.DataFrame:
     col_periodo = None
     for col in df.columns:
         titulo = str(header.get(col, "")).lower()
-        if any(p in titulo for p in ["mês (código)", "mes (código)", "mês", "mes", "período", "periodo"]):
+        if any(
+            p in titulo
+            for p in ["mês (código)", "mes (código)", "mês", "mes", "período", "periodo"]
+        ):
             col_periodo = col
             break
 
@@ -326,7 +359,7 @@ def _buscar_serie_sidra_valor_cached(url: str) -> pd.DataFrame:
     df["data"] = df[col_periodo].apply(_parse_periodo)
     df["valor"] = pd.to_numeric(
         df["V"].astype(str).str.replace(",", "."),
-        errors="coerce"
+        errors="coerce",
     )
 
     df = (
@@ -429,7 +462,7 @@ def buscar_pim_var_acum_12m() -> pd.DataFrame:
 def _resumo_triple_series(
     df_mom: pd.DataFrame,
     df_ano: pd.DataFrame,
-    df_12: pd.DataFrame
+    df_12: pd.DataFrame,
 ) -> Dict[str, float]:
     if df_mom.empty and df_ano.empty and df_12.empty:
         return {
@@ -831,7 +864,9 @@ def montar_tabela_focus_top5() -> pd.DataFrame:
         linha: Dict[str, str] = {"Indicador": nome_exibicao}
 
         for ano in anos:
-            valor = buscar_focus_top5_expectativa_anual(indicador_sub, ano, detalhe_sub)
+            valor = buscar_focus_top5_expectativa_anual(
+                indicador_sub, ano, detalhe_sub
+            )
 
             if isinstance(valor, (int, float)):
                 if eh_percentual:
@@ -860,76 +895,84 @@ def montar_tabela_inflacao() -> pd.DataFrame:
         df_ipca = buscar_ipca_ibge()
         if not df_ipca.empty:
             r = resumo_inflacao(df_ipca)
-            linhas.append({
-                "Indicador": "IPCA (variação mensal)",
-                "Mês ref.": r["referencia"],
-                "Valor (mensal)": f"{r['mensal']:.2f}%",
-                "Acum. no ano": (
-                    f"{r['acum_ano']:.2f}%"
-                    if pd.notna(r["acum_ano"]) else "-"
-                ),
-                "Acum. 12 meses": (
-                    f"{r['acum_12m']:.2f}%"
-                    if pd.notna(r["acum_12m"]) else "-"
-                ),
-                "Fonte": "IBGE / SIDRA (Tabela 1737)",
-            })
+            linhas.append(
+                {
+                    "Indicador": "IPCA (variação mensal)",
+                    "Mês ref.": r["referencia"],
+                    "Valor (mensal)": f"{r['mensal']:.2f}%",
+                    "Acum. no ano": (
+                        f"{r['acum_ano']:.2f}%" if pd.notna(r["acum_ano"]) else "-"
+                    ),
+                    "Acum. 12 meses": (
+                        f"{r['acum_12m']:.2f}%" if pd.notna(r["acum_12m"]) else "-"
+                    ),
+                    "Fonte": "IBGE / SIDRA (Tabela 1737)",
+                }
+            )
         else:
-            linhas.append({
+            linhas.append(
+                {
+                    "Indicador": "IPCA (variação mensal)",
+                    "Mês ref.": "-",
+                    "Valor (mensal)": "sem dados",
+                    "Acum. no ano": "-",
+                    "Acum. 12 meses": "-",
+                    "Fonte": "IBGE / SIDRA (Tabela 1737)",
+                }
+            )
+    except Exception as e:
+        linhas.append(
+            {
                 "Indicador": "IPCA (variação mensal)",
                 "Mês ref.": "-",
-                "Valor (mensal)": "sem dados",
+                "Valor (mensal)": f"Erro: {e}",
                 "Acum. no ano": "-",
                 "Acum. 12 meses": "-",
-                "Fonte": "IBGE / SIDRA (Tabela 1737)",
-            })
-    except Exception as e:
-        linhas.append({
-            "Indicador": "IPCA (variação mensal)",
-            "Mês ref.": "-",
-            "Valor (mensal)": f"Erro: {e}",
-            "Acum. no ano": "-",
-            "Acum. 12 meses": "-",
-            "Fonte": "IBGE / SIDRA",
-        })
+                "Fonte": "IBGE / SIDRA",
+            }
+        )
 
     # IPCA-15
     try:
         df_ipca15 = buscar_ipca15_ibge()
         if not df_ipca15.empty:
             r = resumo_inflacao(df_ipca15)
-            linhas.append({
-                "Indicador": "IPCA-15 (variação mensal)",
-                "Mês ref.": r["referencia"],
-                "Valor (mensal)": f"{r['mensal']:.2f}%",
-                "Acum. no ano": (
-                    f"{r['acum_ano']:.2f}%"
-                    if pd.notna(r["acum_ano"]) else "-"
-                ),
-                "Acum. 12 meses": (
-                    f"{r['acum_12m']:.2f}%"
-                    if pd.notna(r["acum_12m"]) else "-"
-                ),
-                "Fonte": "IBGE / SIDRA (Tabela 3065)",
-            })
+            linhas.append(
+                {
+                    "Indicador": "IPCA-15 (variação mensal)",
+                    "Mês ref.": r["referencia"],
+                    "Valor (mensal)": f"{r['mensal']:.2f}%",
+                    "Acum. no ano": (
+                        f"{r['acum_ano']:.2f}%" if pd.notna(r["acum_ano"]) else "-"
+                    ),
+                    "Acum. 12 meses": (
+                        f"{r['acum_12m']:.2f}%" if pd.notna(r["acum_12m"]) else "-"
+                    ),
+                    "Fonte": "IBGE / SIDRA (Tabela 3065)",
+                }
+            )
         else:
-            linhas.append({
+            linhas.append(
+                {
+                    "Indicador": "IPCA-15 (variação mensal)",
+                    "Mês ref.": "-",
+                    "Valor (mensal)": "sem dados",
+                    "Acum. no ano": "-",
+                    "Acum. 12 meses": "-",
+                    "Fonte": "IBGE / SIDRA (Tabela 3065)",
+                }
+            )
+    except Exception as e:
+        linhas.append(
+            {
                 "Indicador": "IPCA-15 (variação mensal)",
                 "Mês ref.": "-",
-                "Valor (mensal)": "sem dados",
+                "Valor (mensal)": f"Erro: {e}",
                 "Acum. no ano": "-",
                 "Acum. 12 meses": "-",
-                "Fonte": "IBGE / SIDRA (Tabela 3065)",
-            })
-    except Exception as e:
-        linhas.append({
-            "Indicador": "IPCA-15 (variação mensal)",
-            "Mês ref.": "-",
-            "Valor (mensal)": f"Erro: {e}",
-            "Acum. no ano": "-",
-            "Acum. 12 meses": "-",
-            "Fonte": "IBGE / SIDRA",
-        })
+                "Fonte": "IBGE / SIDRA",
+            }
+        )
 
     return pd.DataFrame(linhas)
 
@@ -959,38 +1002,46 @@ def montar_tabela_selic_meta() -> pd.DataFrame:
             else:
                 nivel_12m_val = None
 
-            linhas.append({
-                "Indicador": "Selic Meta",
-                "Data": ultima_data.strftime("%d/%m/%Y"),
-                "Nível atual": f"{ultimo:.2f}% a.a.",
-                "Início do ano": (
-                    f"{inicio_ano_val:.2f}% a.a."
-                    if inicio_ano_val is not None else "-"
-                ),
-                "Há 12 meses": (
-                    f"{nivel_12m_val:.2f}% a.a."
-                    if nivel_12m_val is not None else "-"
-                ),
-                "Fonte": f"BCB / SGS ({SGS_SERIES['selic_meta_aa']})",
-            })
+            linhas.append(
+                {
+                    "Indicador": "Selic Meta",
+                    "Data": ultima_data.strftime("%d/%m/%Y"),
+                    "Nível atual": f"{ultimo:.2f}% a.a.",
+                    "Início do ano": (
+                        f"{inicio_ano_val:.2f}% a.a."
+                        if inicio_ano_val is not None
+                        else "-"
+                    ),
+                    "Há 12 meses": (
+                        f"{nivel_12m_val:.2f}% a.a."
+                        if nivel_12m_val is not None
+                        else "-"
+                    ),
+                    "Fonte": f"BCB / SGS ({SGS_SERIES['selic_meta_aa']})",
+                }
+            )
         else:
-            linhas.append({
+            linhas.append(
+                {
+                    "Indicador": "Selic Meta",
+                    "Data": "-",
+                    "Nível atual": "sem dados",
+                    "Início do ano": "-",
+                    "Há 12 meses": "-",
+                    "Fonte": "BCB / SGS",
+                }
+            )
+    except Exception as e:
+        linhas.append(
+            {
                 "Indicador": "Selic Meta",
                 "Data": "-",
-                "Nível atual": "sem dados",
+                "Nível atual": f"Erro: {e}",
                 "Início do ano": "-",
                 "Há 12 meses": "-",
                 "Fonte": "BCB / SGS",
-            })
-    except Exception as e:
-        linhas.append({
-            "Indicador": "Selic Meta",
-            "Data": "-",
-            "Nível atual": f"Erro: {e}",
-            "Início do ano": "-",
-            "Há 12 meses": "-",
-            "Fonte": "BCB / SGS",
-        })
+            }
+        )
 
     return pd.DataFrame(linhas)
 
@@ -1013,8 +1064,7 @@ def montar_tabela_cdi() -> pd.DataFrame:
         mes_ref = data_ult.month
 
         df_mes = df[
-            (df["data"].dt.year == ano_ref) &
-            (df["data"].dt.month == mes_ref)
+            (df["data"].dt.year == ano_ref) & (df["data"].dt.month == mes_ref)
         ]
         if not df_mes.empty:
             fator_mes = (1 + df_mes["valor"] / 100).prod()
@@ -1037,26 +1087,30 @@ def montar_tabela_cdi() -> pd.DataFrame:
         else:
             cdi_12m = float("nan")
 
-        linhas.append({
-            "Indicador": "CDI (over) diário",
-            "Data ref.": data_ult.strftime("%d/%m/%Y"),
-            "Nível diário": f"{taxa_ult:.4f}% a.d.",
-            "CDI no mês": f"{cdi_mes:.2f}%" if pd.notna(cdi_mes) else "-",
-            "CDI no ano": f"{cdi_ano:.2f}%" if pd.notna(cdi_ano) else "-",
-            "CDI em 12 meses": f"{cdi_12m:.2f}%" if pd.notna(cdi_12m) else "-",
-            "Fonte": f"BCB / SGS ({SGS_SERIES['cdi_diario']})",
-        })
+        linhas.append(
+            {
+                "Indicador": "CDI (over) diário",
+                "Data ref.": data_ult.strftime("%d/%m/%Y"),
+                "Nível diário": f"{taxa_ult:.4f}% a.d.",
+                "CDI no mês": f"{cdi_mes:.2f}%" if pd.notna(cdi_mes) else "-",
+                "CDI no ano": f"{cdi_ano:.2f}%" if pd.notna(cdi_ano) else "-",
+                "CDI em 12 meses": f"{cdi_12m:.2f}%" if pd.notna(cdi_12m) else "-",
+                "Fonte": f"BCB / SGS ({SGS_SERIES['cdi_diario']})",
+            }
+        )
 
     except Exception as e:
-        linhas.append({
-            "Indicador": "CDI (over) diário",
-            "Data ref.": "-",
-            "Nível diário": f"Erro: {e}",
-            "CDI no mês": "-",
-            "CDI no ano": "-",
-            "CDI em 12 meses": "-",
-            "Fonte": "BCB / SGS",
-        })
+        linhas.append(
+            {
+                "Indicador": "CDI (over) diário",
+                "Data ref.": "-",
+                "Nível diário": f"Erro: {e}",
+                "CDI no mês": "-",
+                "CDI no ano": "-",
+                "CDI em 12 meses": "-",
+                "Fonte": "BCB / SGS",
+            }
+        )
 
     return pd.DataFrame(linhas)
 
@@ -1073,12 +1127,18 @@ def montar_tabela_ptax() -> pd.DataFrame:
             nivel_atual = f"R$ {r['ultimo']:.4f}"
 
             if r["valor_12m"] is not None and r["data_12m"] is not None:
-                nivel_12m = f"R$ {r['valor_12m']:.4f} ({r['data_12m'].strftime('%d/%m/%Y')})"
+                nivel_12m = (
+                    f"R$ {r['valor_12m']:.4f} "
+                    f"({r['data_12m'].strftime('%d/%m/%Y')})"
+                )
             else:
                 nivel_12m = "-"
 
             if r["valor_24m"] is not None and r["data_24m"] is not None:
-                nivel_24m = f"R$ {r['valor_24m']:.4f} ({r['data_24m'].strftime('%d/%m/%Y')})"
+                nivel_24m = (
+                    f"R$ {r['valor_24m']:.4f} "
+                    f"({r['data_24m'].strftime('%d/%m/%Y')})"
+                )
             else:
                 nivel_24m = "-"
 
@@ -1094,30 +1154,34 @@ def montar_tabela_ptax() -> pd.DataFrame:
             var_12m = "-"
             var_24m = "-"
 
-        linhas.append({
-            "Indicador": "Dólar PTAX - venda",
-            "Data": ultima_data_str,
-            "Nível atual": nivel_atual,
-            "Nível há 12m": nivel_12m,
-            "Nível há 24m": nivel_24m,
-            "Var. ano": var_ano,
-            "Var. 12m": var_12m,
-            "Var. 24m": var_24m,
-            "Fonte": f"BCB / SGS ({SGS_SERIES['ptax_venda']})",
-        })
+        linhas.append(
+            {
+                "Indicador": "Dólar PTAX - venda",
+                "Data": ultima_data_str,
+                "Nível atual": nivel_atual,
+                "Nível há 12m": nivel_12m,
+                "Nível há 24m": nivel_24m,
+                "Var. ano": var_ano,
+                "Var. 12m": var_12m,
+                "Var. 24m": var_24m,
+                "Fonte": f"BCB / SGS ({SGS_SERIES['ptax_venda']})",
+            }
+        )
 
     except Exception as e:
-        linhas.append({
-            "Indicador": "Dólar PTAX - venda",
-            "Data": "-",
-            "Nível atual": f"Erro: {e}",
-            "Nível há 12m": "-",
-            "Nível há 24m": "-",
-            "Var. ano": "-",
-            "Var. 12m": "-",
-            "Var. 24m": "-",
-            "Fonte": "BCB / SGS",
-        })
+        linhas.append(
+            {
+                "Indicador": "Dólar PTAX - venda",
+                "Data": "-",
+                "Nível atual": f"Erro: {e}",
+                "Nível há 12m": "-",
+                "Nível há 24m": "-",
+                "Var. ano": "-",
+                "Var. 12m": "-",
+                "Var. 24m": "-",
+                "Fonte": "BCB / SGS",
+            }
+        )
 
     return pd.DataFrame(linhas)
 
@@ -1129,8 +1193,8 @@ def montar_tabela_di_futuro() -> pd.DataFrame:
     Usa a API pública leve da B3:
         https://cotacao.b3.com.br/mds/api/v1/DerivativeQuotation/DI1
 
-    Retorna uma tabela com os principais vencimentos, taxa implícita
-    e contratos em aberto.
+    Retorna uma tabela com os principais vencimentos e as taxas
+    (sem a coluna de contratos em aberto).
     """
     linhas: List[Dict[str, str]] = []
 
@@ -1139,76 +1203,97 @@ def montar_tabela_di_futuro() -> pd.DataFrame:
         resp = _get_with_retry(url, timeout=30)
         data = resp.json()
 
-        contratos = data.get("Scty", [])
-        if not contratos:
-            raise ValueError("Resposta da B3 sem contratos DI1.")
+        scty_list = data.get("Scty", [])
 
-        rows = []
-        for c in contratos:
-            qtn = c.get("SctyQtn", {}) or {}
-            asset = c.get("asset", {}) or {}
-            summ = asset.get("AsstSummry", {}) or {}
+        if not scty_list:
+            raise ValueError("Resposta da B3 sem lista 'Scty'.")
 
-            symb = c.get("symb")
-            mtrty = summ.get("mtrtyCode")
-            cur = qtn.get("curPrc")
-            prev = qtn.get("prvsDayAdjstmntPric")
-
-            # Ignora contratos sem taxa ou vencimento
-            if symb is None or mtrty is None or cur is None:
+        # -------------------------------------------------------------
+        # Montagem das linhas com os principais campos da B3
+        # -------------------------------------------------------------
+        for item in scty_list:
+            # Exemplo de símbolo: DI1Z25, DI1F26 etc.
+            symb = (item.get("symb") or "").strip()
+            if not symb.startswith("DI1"):
                 continue
 
-            # variação em basis points (bps)
-            if prev is not None:
-                var_bps = (cur - prev) * 100
-            else:
-                var_bps = None
+            asset = item.get("asset") or {}
+            asst_summary = asset.get("AsstSummry") or {}
+            scty_qtn = item.get("SctyQtn") or {}
 
-            rows.append(
+            # Vencimento
+            mtrty_str = asst_summary.get("mtrtyCode")
+            try:
+                if mtrty_str:
+                    mtrty_dt = datetime.strptime(mtrty_str, "%Y-%m-%d").date()
+                    vencimento_fmt = mtrty_dt.strftime("%d/%m/%Y")
+                else:
+                    vencimento_fmt = "-"
+            except Exception:
+                vencimento_fmt = "-"
+
+            # Taxas e variação
+            taxa_atual = scty_qtn.get("curPrc")
+            taxa_ant = scty_qtn.get("prvsDayAdjstmntPric")
+            variacao_bps = scty_qtn.get("prcFlcn")
+
+            # Se a B3 não enviar a variação, tenta calcular manualmente
+            if variacao_bps is None and taxa_atual is not None and taxa_ant is not None:
+                try:
+                    variacao_bps = (float(taxa_atual) - float(taxa_ant)) * 100.0
+                except Exception:
+                    variacao_bps = None
+
+            def fmt_taxa(x) -> str:
+                if x is None:
+                    return "-"
+                try:
+                    return f"{float(x):.4f}%"
+                except Exception:
+                    return "-"
+
+            def fmt_bps(x) -> str:
+                if x is None:
+                    return "-"
+                try:
+                    return f"{float(x):+.1f}"
+                except Exception:
+                    return "-"
+
+            linhas.append(
                 {
                     "Contrato": symb,
-                    "Vencimento": mtrty,
-                    "Taxa (%)": cur,
-                    "Taxa dia ant. (%)": prev,
-                    "Variação (bps)": var_bps,
-                    "Contratos em aberto": summ.get("opnCtrcts"),
+                    "Vencimento": vencimento_fmt,
+                    "Taxa (%)": fmt_taxa(taxa_atual),
+                    "Taxa dia ant. (%)": fmt_taxa(taxa_ant),
+                    "Variação (bps)": fmt_bps(variacao_bps),
                 }
             )
 
-        if not rows:
-            raise ValueError("Não há dados utilizáveis dos contratos DI1.")
+        if not linhas:
+            raise ValueError("Nenhum contrato DI1 encontrado na resposta da B3.")
 
-        df = pd.DataFrame(rows)
+        df = pd.DataFrame(linhas)
 
-        # Ordena por vencimento e pega só os primeiros (curva mais líquida)
-        df["Vencimento"] = pd.to_datetime(df["Vencimento"], errors="coerce")
-        df = df.dropna(subset=["Vencimento"]).sort_values("Vencimento")
+        # -------------------------------------------------------------
+        # Ordena por vencimento (convertendo a string de volta para data)
+        # -------------------------------------------------------------
+        def parse_venc(x: str):
+            try:
+                return datetime.strptime(x, "%d/%m/%Y").date()
+            except Exception:
+                # empurra valores inválidos para o fim
+                return datetime.max.date()
 
-        # 4 contratos mais curtos
-        curtos = df.head(4)
-
-        # 4 contratos mais longos
-        longos = df.tail(4)
-        df = pd.concat([curtos, longos]).reset_index(drop=True)
-
-        # Formatação amigável para exibição
-        df["Vencimento"] = df["Vencimento"].dt.strftime("%d/%m/%Y")
-        df["Taxa (%)"] = df["Taxa (%)"].map(lambda x: f"{x:.3f}%")
-        df["Taxa dia ant. (%)"] = df["Taxa dia ant. (%)"].map(
-            lambda x: f"{x:.3f}%" if pd.notnull(x) else "-"
-        )
-
-        df["Variação (bps)"] = df["Variação (bps)"].map(
-            lambda x: f"{x:+.1f}" if pd.notnull(x) else "-"
-        )
-        df["Contratos em aberto"] = df["Contratos em aberto"].map(
-            lambda x: f"{int(x):,}".replace(",", ".") if pd.notnull(x) else "-"
+        df = df.sort_values(by="Vencimento", key=lambda s: s.apply(parse_venc)).reset_index(
+            drop=True
         )
 
         return df
 
     except Exception as e:
-        # Linha de fallback se der erro na API da B3
+        # Fallback amigável se der erro na API da B3
+        print(f"Erro ao montar curva DI Futuro (B3): {e}")
         linhas.append(
             {
                 "Contrato": "DI1 – curva",
@@ -1216,7 +1301,6 @@ def montar_tabela_di_futuro() -> pd.DataFrame:
                 "Taxa (%)": "-",
                 "Taxa dia ant. (%)": "-",
                 "Variação (bps)": "-",
-                "Contratos em aberto": f"Erro ao consultar B3: {e}",
             }
         )
         return pd.DataFrame(linhas)
@@ -1229,130 +1313,157 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
     try:
         r_pmc = resumo_pmc_oficial()
         if r_pmc["referencia"] != "-":
-            linhas.append({
-                "Indicador": "Varejo (PMC) – volume",
-                "Classificação": "🟡 Coincidente",
-                "Mês ref.": r_pmc["referencia"],
-                "Var. mensal": (
-                    f"{r_pmc['var_mensal']:.1f}%"
-                    if pd.notna(r_pmc["var_mensal"]) else "-"
-                ),
-                "Acum. no ano": (
-                    f"{r_pmc['acum_ano']:.1f}%"
-                    if pd.notna(r_pmc["acum_ano"]) else "-"
-                ),
-                "Acum. 12 meses": (
-                    f"{r_pmc['acum_12m']:.1f}%"
-                    if pd.notna(r_pmc["acum_12m"]) else "-"
-                ),
-                "Fonte": "IBGE / PMC (SIDRA – Tabela 8880)",
-            })
+            linhas.append(
+                {
+                    "Indicador": "Varejo (PMC) – volume",
+                    "Classificação": "🟡 Coincidente",
+                    "Mês ref.": r_pmc["referencia"],
+                    "Var. mensal": (
+                        f"{r_pmc['var_mensal']:.1f}%"
+                        if pd.notna(r_pmc["var_mensal"])
+                        else "-"
+                    ),
+                    "Acum. no ano": (
+                        f"{r_pmc['acum_ano']:.1f}%"
+                        if pd.notna(r_pmc["acum_ano"])
+                        else "-"
+                    ),
+                    "Acum. 12 meses": (
+                        f"{r_pmc['acum_12m']:.1f}%"
+                        if pd.notna(r_pmc["acum_12m"])
+                        else "-"
+                    ),
+                    "Fonte": "IBGE / PMC (SIDRA – Tabela 8880)",
+                }
+            )
         else:
-            linhas.append({
+            linhas.append(
+                {
+                    "Indicador": "Varejo (PMC) – volume",
+                    "Classificação": "🟡 Coincidente",
+                    "Mês ref.": "-",
+                    "Var. mensal": "sem dados",
+                    "Acum. no ano": "-",
+                    "Acum. 12 meses": "-",
+                    "Fonte": "IBGE / PMC (SIDRA – Tabela 8880)",
+                }
+            )
+    except Exception as e:
+        linhas.append(
+            {
                 "Indicador": "Varejo (PMC) – volume",
                 "Classificação": "🟡 Coincidente",
                 "Mês ref.": "-",
-                "Var. mensal": "sem dados",
+                "Var. mensal": f"Erro: {e}",
                 "Acum. no ano": "-",
                 "Acum. 12 meses": "-",
                 "Fonte": "IBGE / PMC (SIDRA – Tabela 8880)",
-            })
-    except Exception as e:
-        linhas.append({
-            "Indicador": "Varejo (PMC) – volume",
-            "Classificação": "🟡 Coincidente",
-            "Mês ref.": "-",
-            "Var. mensal": f"Erro: {e}",
-            "Acum. no ano": "-",
-            "Acum. 12 meses": "-",
-            "Fonte": "IBGE / PMC (SIDRA – Tabela 8880)",
-        })
+            }
+        )
 
     # Serviços (PMS) – COINCIDENTE
     try:
         r_pms = resumo_pms_oficial()
         if r_pms["referencia"] != "-":
-            linhas.append({
-                "Indicador": "Serviços (PMS) – volume",
-                "Classificação": "🟡 Coincidente",
-                "Mês ref.": r_pms["referencia"],
-                "Var. mensal": (
-                    f"{r_pms['var_mensal']:.1f}%"
-                    if pd.notna(r_pms["var_mensal"]) else "-"
-                ),
-                "Acum. no ano": (
-                    f"{r_pms['acum_ano']:.1f}%"
-                    if pd.notna(r_pms["acum_ano"]) else "-"
-                ),
-                "Acum. 12 meses": (
-                    f"{r_pms['acum_12m']:.1f}%"
-                    if pd.notna(r_pms["acum_12m"]) else "-"
-                ),
-                "Fonte": "IBGE / PMS (SIDRA – Tabela 5906)",
-            })
+            linhas.append(
+                {
+                    "Indicador": "Serviços (PMS) – volume",
+                    "Classificação": "🟡 Coincidente",
+                    "Mês ref.": r_pms["referencia"],
+                    "Var. mensal": (
+                        f"{r_pms['var_mensal']:.1f}%"
+                        if pd.notna(r_pms["var_mensal"])
+                        else "-"
+                    ),
+                    "Acum. no ano": (
+                        f"{r_pms['acum_ano']:.1f}%"
+                        if pd.notna(r_pms["acum_ano"])
+                        else "-"
+                    ),
+                    "Acum. 12 meses": (
+                        f"{r_pms['acum_12m']:.1f}%"
+                        if pd.notna(r_pms["acum_12m"])
+                        else "-"
+                    ),
+                    "Fonte": "IBGE / PMS (SIDRA – Tabela 5906)",
+                }
+            )
         else:
-            linhas.append({
+            linhas.append(
+                {
+                    "Indicador": "Serviços (PMS) – volume",
+                    "Classificação": "🟡 Coincidente",
+                    "Mês ref.": "-",
+                    "Var. mensal": "sem dados",
+                    "Acum. no ano": "-",
+                    "Acum. 12 meses": "-",
+                    "Fonte": "IBGE / PMS (SIDRA – Tabela 5906)",
+                }
+            )
+    except Exception as e:
+        linhas.append(
+            {
                 "Indicador": "Serviços (PMS) – volume",
                 "Classificação": "🟡 Coincidente",
                 "Mês ref.": "-",
-                "Var. mensal": "sem dados",
+                "Var. mensal": f"Erro: {e}",
                 "Acum. no ano": "-",
                 "Acum. 12 meses": "-",
                 "Fonte": "IBGE / PMS (SIDRA – Tabela 5906)",
-            })
-    except Exception as e:
-        linhas.append({
-            "Indicador": "Serviços (PMS) – volume",
-            "Classificação": "🟡 Coincidente",
-            "Mês ref.": "-",
-            "Var. mensal": f"Erro: {e}",
-            "Acum. no ano": "-",
-            "Acum. 12 meses": "-",
-            "Fonte": "IBGE / PMS (SIDRA – Tabela 5906)",
-        })
+            }
+        )
 
     # Indústria (PIM-PF) – COINCIDENTE
     try:
         r_pim = resumo_pim_oficial()
         if r_pim["referencia"] != "-":
-            linhas.append({
-                "Indicador": "Indústria (PIM-PF) – produção física",
-                "Classificação": "🟡 Coincidente",
-                "Mês ref.": r_pim["referencia"],
-                "Var. mensal": (
-                    f"{r_pim['var_mensal']:.1f}%"
-                    if pd.notna(r_pim["var_mensal"]) else "-"
-                ),
-                "Acum. no ano": (
-                    f"{r_pim['acum_ano']:.1f}%"
-                    if pd.notna(r_pim["acum_ano"]) else "-"
-                ),
-                "Acum. 12 meses": (
-                    f"{r_pim['acum_12m']:.1f}%"
-                    if pd.notna(r_pim["acum_12m"]) else "-"
-                ),
-                "Fonte": "IBGE / PIM-PF (SIDRA – Tabela 8888)",
-            })
+            linhas.append(
+                {
+                    "Indicador": "Indústria (PIM-PF) – produção física",
+                    "Classificação": "🟡 Coincidente",
+                    "Mês ref.": r_pim["referencia"],
+                    "Var. mensal": (
+                        f"{r_pim['var_mensal']:.1f}%"
+                        if pd.notna(r_pim["var_mensal"])
+                        else "-"
+                    ),
+                    "Acum. no ano": (
+                        f"{r_pim['acum_ano']:.1f}%"
+                        if pd.notna(r_pim["acum_ano"])
+                        else "-"
+                    ),
+                    "Acum. 12 meses": (
+                        f"{r_pim['acum_12m']:.1f}%"
+                        if pd.notna(r_pim["acum_12m"])
+                        else "-"
+                    ),
+                    "Fonte": "IBGE / PIM-PF (SIDRA – Tabela 8888)",
+                }
+            )
         else:
-            linhas.append({
+            linhas.append(
+                {
+                    "Indicador": "Indústria (PIM-PF) – produção física",
+                    "Classificação": "🟡 Coincidente",
+                    "Mês ref.": "-",
+                    "Var. mensal": "sem dados",
+                    "Acum. no ano": "-",
+                    "Acum. 12 meses": "-",
+                    "Fonte": "IBGE / PIM-PF (SIDRA – Tabela 8888)",
+                }
+            )
+    except Exception as e:
+        linhas.append(
+            {
                 "Indicador": "Indústria (PIM-PF) – produção física",
                 "Classificação": "🟡 Coincidente",
                 "Mês ref.": "-",
-                "Var. mensal": "sem dados",
+                "Var. mensal": f"Erro: {e}",
                 "Acum. no ano": "-",
                 "Acum. 12 meses": "-",
                 "Fonte": "IBGE / PIM-PF (SIDRA – Tabela 8888)",
-            })
-    except Exception as e:
-        linhas.append({
-            "Indicador": "Indústria (PIM-PF) – produção física",
-            "Classificação": "🟡 Coincidente",
-            "Mês ref.": "-",
-            "Var. mensal": f"Erro: {e}",
-            "Acum. no ano": "-",
-            "Acum. 12 meses": "-",
-            "Fonte": "IBGE / PIM-PF (SIDRA – Tabela 8888)",
-        })
+            }
+        )
 
     return pd.DataFrame(linhas)
 
@@ -1364,6 +1475,7 @@ def render_bloco1_observatorio_mercado(
     df_cdi,
     df_ptax,
     df_di_fut,
+    df_hist_di,
 ):
     """
     Estrutura:
@@ -1371,7 +1483,8 @@ def render_bloco1_observatorio_mercado(
         - Sub-aba "Curto prazo":
             - Selic Meta, CDI acumulado e câmbio PTAX
             - Curva de juros – DI Futuro (B3)
-            - Curva de juros – ANBIMA (prefixado x IPCA+): juro nominal, real e breakeven
+            - Histórico DI Futuro (B3)
+            - Curva de juros – ANBIMA (prefixado x IPCA+)
         - Sub-aba "Expectativas":
             - Focus – Mediana (consenso do mercado)
             - Focus – Top 5 (instituições mais assertivas)
@@ -1386,14 +1499,9 @@ def render_bloco1_observatorio_mercado(
     # ABA BRASIL
     # ==========================
     with tab_br:
-        subtab_indic_br, subtab_exp_br = st.tabs(
-            [
-                "Curto prazo",
-                "Expectativas",
-            ]
-        )
+        subtab_indic_br, subtab_exp_br = st.tabs(["Curto prazo", "Expectativas"])
 
-    # -------- Indicadores BR --------
+        # -------- Indicadores BR --------
         with subtab_indic_br:
             st.markdown("### Indicadores de curto prazo – Brasil")
             st.caption(
@@ -1402,24 +1510,28 @@ def render_bloco1_observatorio_mercado(
                 "com foco em leitura de curto e médio prazo."
             )
 
+            # Selic
             st.markdown("**Taxa básica – Selic Meta**")
             st.dataframe(
                 df_selic.set_index("Indicador"),
                 width="stretch",
             )
 
+            # CDI
             st.markdown("**CDI – Retorno acumulado**")
             st.dataframe(
                 df_cdi.set_index("Indicador"),
                 width="stretch",
             )
 
+            # Câmbio
             st.markdown("**Câmbio – Dólar PTAX (venda)**")
             st.dataframe(
                 df_ptax.set_index("Indicador"),
                 width="stretch",
             )
 
+            # Curva DI Futuro (snapshot de hoje)
             st.markdown("**Curva de juros – DI Futuro (B3)**")
             st.caption(
                 "Principais vencimentos do contrato DI1, com taxa implícita anualizada "
@@ -1431,6 +1543,94 @@ def render_bloco1_observatorio_mercado(
             )
 
             # -------------------------------
+            # Histórico – DI Futuro (B3) – opcional, em expander
+            # -------------------------------
+            st.markdown("**Histórico – DI Futuro (B3)**")
+            with st.expander(
+                "Ver evolução histórica da taxa por contrato (opcional)"
+            ):
+                if df_hist_di is None or df_hist_di.empty:
+                    st.info(
+                        "Ainda não há histórico salvo de DI Futuro. "
+                        "Certifique-se de rodar o app em dias úteis para ir "
+                        "acumulando as observações no arquivo "
+                        "`data/di_futuro/di1_historico.csv`."
+                    )
+                    df_sel = None
+                else:
+                    # garante ordenação por data
+                    df_hist = df_hist_di.copy()
+                    df_hist["data"] = pd.to_datetime(df_hist["data"])
+                    df_hist = df_hist.sort_values("data")
+
+                    # lista de tickers disponíveis
+                    tickers = sorted(df_hist["ticker"].unique())
+
+                    # tenta deixar DI1Z25 como padrão, se existir
+                    idx_default = (
+                        tickers.index("DI1Z25") if "DI1Z25" in tickers else 0
+                    )
+
+                    contrato_sel = st.selectbox(
+                        "Selecione o contrato DI1 para análise histórica",
+                        options=tickers,
+                        index=idx_default,
+                    )
+
+                    df_sel = df_hist[df_hist["ticker"] == contrato_sel].copy()
+                    df_sel = df_sel.set_index("data")
+
+                    # gráfico da taxa
+                    st.line_chart(
+                        df_sel[["taxa"]],
+                        width="stretch",
+                    )
+
+                    st.caption(
+                        "Taxa implícita do contrato selecionado (% a.a.), "
+                        "com base no histórico salvo em CSV."
+                    )
+
+                    # -----------------------
+                    # Últimas observações
+                    # -----------------------
+                    st.markdown("Últimas observações:")
+
+                    colunas_base = ["taxa", "variacao_bps", "volume"]
+                    colunas_existentes = [
+                        c for c in colunas_base if c in df_sel.columns
+                    ]
+
+                    if colunas_existentes:
+                        mapa_renome = {
+                            "taxa": "Taxa (%)",
+                            "variacao_bps": "Var. (bps)",
+                            "volume": "Volume",
+                        }
+
+                        df_ultimas = (
+                            df_sel[colunas_existentes]
+                            .tail(10)
+                            .rename(
+                                columns={
+                                    c: mapa_renome[c]
+                                    for c in colunas_existentes
+                                }
+                            )
+                        )
+
+                        st.dataframe(
+                            df_ultimas,
+                            width="stretch",
+                        )
+                    else:
+                        st.info(
+                            "Ainda não há colunas suficientes no histórico para montar a "
+                            "tabela de últimas observações (ex.: 'variacao_bps' ou "
+                            "'volume')."
+                        )
+
+            # -------------------------------
             # Curva de juros – ANBIMA
             # -------------------------------
             st.markdown("### Curva de juros – ANBIMA (Prefixado x IPCA+)")
@@ -1439,14 +1639,6 @@ def render_bloco1_observatorio_mercado(
                 "com base nas curvas da ANBIMA (DI, prefixada e IPCA+), usando "
                 "histórico salvo localmente em CSV."
             )
-
-            # Tenta atualizar as curvas do dia (não quebra o app se falhar)
-            try:
-                atualizar_todas_as_curvas()
-            except Exception as e:
-                st.warning(
-                    f"Não foi possível atualizar as curvas ANBIMA hoje: {e}"
-                )
 
             df_curva_hoje = montar_curva_anbima_hoje()
 
@@ -1458,13 +1650,17 @@ def render_bloco1_observatorio_mercado(
                     "popular o histórico (arquivos em data/curvas_anbima)."
                 )
             else:
-                st.markdown("**Níveis atuais por vértice (nominal, real e breakeven)**")
+                st.markdown(
+                    "**Níveis atuais por vértice (nominal, real e breakeven)**"
+                )
                 st.dataframe(
                     df_curva_hoje.set_index("Vértice (anos)"),
                     width="stretch",
                 )
 
-                st.markdown("**Abertura/fechamento por vértice – visão resumida**")
+                st.markdown(
+                    "**Abertura/fechamento por vértice – visão resumida**"
+                )
                 vertice = st.selectbox(
                     "Selecione o vértice para análise de abertura/fechamento",
                     options=[2, 5, 10, 20],
@@ -1491,7 +1687,7 @@ def render_bloco1_observatorio_mercado(
                         "(D-1, 1 semana, 1 mês, início do ano, 12 meses)."
                     )
 
-    # -------- Expectativas BR --------
+        # -------- Expectativas BR --------
         with subtab_exp_br:
             st.markdown("### Expectativas de mercado – Brasil (Focus)")
             st.caption(
@@ -1587,7 +1783,9 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
     df_exibir = df_ativ.copy()
 
     if filtro == "Coincidentes":
-        df_exibir = df_exibir[df_exibir["Classificação"].str.contains("Coincidente")]
+        df_exibir = df_exibir[
+            df_exibir["Classificação"].str.contains("Coincidente")
+        ]
 
     st.dataframe(
         df_exibir.set_index(["Indicador", "Classificação"]),
@@ -1666,9 +1864,41 @@ def get_tabela_di_futuro():
     return montar_tabela_di_futuro()
 
 
+@st.cache_data(ttl=60 * 10)
+def get_historico_di_futuro():
+    """
+    Lê o CSV de histórico de DI Futuro (data/di_futuro/di1_historico.csv).
+    Se ainda não existir, retorna DataFrame vazio.
+    """
+    try:
+        df = carregar_historico_di_futuro()
+        return df
+    except FileNotFoundError:
+        return pd.DataFrame()
+
+
 # =============================================================================
 # STREAMLIT - INTERFACE
 # =============================================================================
+
+
+def atualizar_dados_externos():
+    """
+    Atualiza os dados que ficam salvos em CSV fora do app principal:
+    - Curvas ANBIMA (prefixada, DI, IPCA+)
+    - Histórico dos contratos DI Futuro (B3)
+    """
+    # Atualiza curvas ANBIMA
+    try:
+        atualizar_todas_as_curvas()
+    except Exception as e:
+        st.warning(f"Não foi possível atualizar curvas ANBIMA: {e}")
+
+    # Atualiza histórico DI Futuro B3
+    try:
+        atualizar_historico_di_futuro()
+    except Exception as e:
+        st.warning(f"Não foi possível atualizar histórico DI Futuro B3: {e}")
 
 
 def main():
@@ -1677,9 +1907,14 @@ def main():
         layout="wide",
     )
 
+    # 🔄 Atualiza ANBIMA + DI Futuro B3 logo que o app inicia
+    with st.spinner("Atualizando curvas ANBIMA e histórico de DI Futuro B3..."):
+        atualizar_dados_externos()
+
     st.title("Observatório Macro")
     st.caption(
-        "Painel de conjuntura e inteligência macroeconômica – dados oficiais do IBGE, BCB e fontes internacionais."
+        "Painel de conjuntura e inteligência macroeconômica – dados oficiais do IBGE, "
+        "BCB e fontes internacionais."
     )
 
     st.write("---")
@@ -1693,19 +1928,20 @@ def main():
         df_cdi = get_tabela_cdi()
         df_ptax = get_tabela_ptax()
         df_di_fut = get_tabela_di_futuro()
+        df_hist_di = get_historico_di_futuro()
 
-    # ============================
-    # TABS DOS 7 BLOCOS MACRO
-    # ============================
+    # ==========
+    # LAYOUT PRINCIPAL COM TABS
+    # ==========
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
         [
-            "🟦 Expectativas / Termômetros",
-            "🟥 Fiscal",
-            "🟩 Setor Externo",
-            "🟧 Mercado de Trabalho",
-            "🟪 Atividade Econômica",
-            "🟫 Inflação",
-            "⬛ Crédito & Condições",
+            "📊 Termômetros de Mercado",
+            "🏛 Fiscal",
+            "🌍 Setor Externo",
+            "👷 Mercado de Trabalho",
+            "🏭 Atividade Real",
+            "📈 Inflação",
+            "💳 Crédito & Condições",
         ]
     )
 
@@ -1717,6 +1953,7 @@ def main():
             df_cdi=df_cdi,
             df_ptax=df_ptax,
             df_di_fut=df_di_fut,
+            df_hist_di=df_hist_di,
         )
 
     with tab2:
