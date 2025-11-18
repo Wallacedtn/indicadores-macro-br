@@ -1,6 +1,6 @@
 {
-  "name": "Python 3.11 - Streamlit",
-  "image": "mcr.microsoft.com/devcontainers/python:3.11-bookworm",
+  "name": "Python 3.13 - Streamlit",
+  "image": "mcr.microsoft.com/devcontainers/python:3.13-bookworm",
   "customizations": {
     "codespaces": {
       "openFiles": [
