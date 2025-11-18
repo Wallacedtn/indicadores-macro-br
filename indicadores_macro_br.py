@@ -31,25 +31,6 @@ warnings.filterwarnings("ignore", message=".*use_container_width.*")
 # =============================================================================
 
 
-def atualizar_dados_externos():
-    """
-    Atualiza os dados que ficam salvos em CSV fora do app principal:
-    - Curvas ANBIMA (prefixada, DI, IPCA+)
-    - Histórico dos contratos DI Futuro (B3)
-    """
-    # Atualiza curvas ANBIMA
-    try:
-        atualizar_todas_as_curvas()
-    except Exception as e:
-        st.warning(f"Não foi possível atualizar curvas ANBIMA: {e}")
-
-    # Atualiza histórico DI Futuro B3
-    try:
-        atualizar_historico_di_futuro()
-    except Exception as e:
-        st.warning(f"Não foi possível atualizar histórico DI Futuro B3: {e}")
-
-
 def _get_with_retry(
     url: str,
     max_attempts: int = 2,
@@ -1591,6 +1572,24 @@ def render_bloco1_observatorio_mercado(
                         df_hist["volume"] = pd.NA
 
                     # --------------------------------------
+                    # Trata taxa / ajuste:
+                    # cria coluna 'taxa_final' com fallback no ajuste
+                    # --------------------------------------
+                    df_hist["taxa"] = pd.to_numeric(
+                        df_hist.get("taxa"), errors="coerce"
+                    )
+                    if "ajuste" in df_hist.columns:
+                        df_hist["ajuste"] = pd.to_numeric(
+                            df_hist.get("ajuste"), errors="coerce"
+                        )
+                        df_hist["taxa_final"] = df_hist["taxa"].fillna(
+                            df_hist["ajuste"]
+                        )
+                    else:
+                        df_hist["taxa_final"] = df_hist["taxa"]
+
+
+                    # --------------------------------------
                     # Extrai o ano de vencimento do ticker (ex.: DI1F26 -> 2026)
                     # --------------------------------------
                     def _extrair_ano(ticker: str) -> Optional[int]:
@@ -1666,9 +1665,14 @@ def render_bloco1_observatorio_mercado(
                         # --------------------------------------
                         df_plot = (
                             df_hist[df_hist["ticker"].isin(tickers_ancora)]
-                            .pivot(index="data", columns="ticker", values="taxa")
+                            .pivot(
+                                index="data",
+                                columns="ticker",
+                                values="taxa_final",
+                            )
                             .sort_index()
                         )
+
 
                         if df_plot.shape[0] >= 2:
                             df_long = (
@@ -1738,9 +1742,10 @@ def render_bloco1_observatorio_mercado(
                         linhas_resumo: List[Dict[str, str]] = []
 
                         for ticker in tickers_ancora:
+                            # Usa taxa_final (taxa ou ajuste)
                             serie = (
                                 df_hist[df_hist["ticker"] == ticker]
-                                .set_index("data")["taxa"]
+                                .set_index("data")["taxa_final"]
                                 .sort_index()
                             )
                             if serie.empty:
@@ -1748,12 +1753,20 @@ def render_bloco1_observatorio_mercado(
 
                             datas = serie.index
                             data_hoje = datas.max()
-                            taxa_hoje = float(serie.loc[data_hoje])
+                            valor_hoje = serie.loc[data_hoje]
+
+                            taxa_hoje = (
+                                float(valor_hoje) if pd.notna(valor_hoje) else None
+                            )
 
                             linha: Dict[str, str] = {
                                 "Contrato": ticker,
                                 "Data hoje": data_hoje.strftime("%d/%m/%Y"),
-                                "Hoje": f"{taxa_hoje:.4f}%",
+                                "Hoje": (
+                                    f"{taxa_hoje:.4f}%"
+                                    if taxa_hoje is not None
+                                    else "-"
+                                ),
                             }
 
                             horizontes = [
@@ -1771,8 +1784,12 @@ def render_bloco1_observatorio_mercado(
                                     linha[rotulo] = "-"
                                 else:
                                     data_ref = datas_validas.max()
-                                    taxa_ref = float(serie.loc[data_ref])
-                                    linha[rotulo] = f"{taxa_ref:.4f}%"
+                                    valor_ref = serie.loc[data_ref]
+                                    if pd.isna(valor_ref):
+                                        linha[rotulo] = "-"
+                                    else:
+                                        taxa_ref = float(valor_ref)
+                                        linha[rotulo] = f"{taxa_ref:.4f}%"
 
                             linhas_resumo.append(linha)
 
@@ -1791,6 +1808,7 @@ def render_bloco1_observatorio_mercado(
             # -------------------------------
             # Curva de juros – ANBIMA
             # -------------------------------
+
             st.markdown("### Curva de juros – ANBIMA (Prefixado x IPCA+)")
             st.caption(
                 "Juro nominal, juro real e breakeven para vértices selecionados "
@@ -1809,23 +1827,18 @@ def render_bloco1_observatorio_mercado(
                 )
             else:
                 st.markdown(
-                    "**Níveis atuais por vértice (nominal, real e breakeven)**"
-                )
-                st.dataframe(
-                    df_curva_hoje.set_index("Vértice (anos)"),
-                    width="stretch",
+                    "**Abertura/fechamento por vértice – escolha a curva que você quer enxergar**"
                 )
 
-                st.markdown(
-                    "**Abertura/fechamento por vértice – visão resumida**"
-                )
+                # apenas escolhemos o vértice
                 vertice = st.selectbox(
-                    "Selecione o vértice para análise de abertura/fechamento",
+                    "Vértice (anos)",
                     options=[2, 5, 10, 20],
-                    index=2,
+                    index=1,  # 2 anos como padrão
                     format_func=lambda x: f"{x} anos",
                 )
 
+                # DataFrame com as variações para o vértice escolhido
                 df_var = montar_curva_anbima_variacoes(anos=vertice)
 
                 if df_var.empty:
@@ -1835,16 +1848,66 @@ def render_bloco1_observatorio_mercado(
                         "observações diárias das curvas ANBIMA."
                     )
                 else:
-                    st.dataframe(
-                        df_var.set_index("Data"),
-                        width="stretch",
-                    )
+                    # vamos mostrar as 3 curvas em 3 tabelas lado a lado
+                    col_pref, col_ipca, col_breakeven = st.columns(3)
+
+                    def montar_tabela_curva(df_base: pd.DataFrame, nome_coluna: str, titulo: str):
+                        """
+                        df_base: df_var completo
+                        nome_coluna: nome da coluna em df_var ("Juro Nominal (%)", ...)
+                        titulo: texto que vai aparecer no cabeçalho da tabela
+                        """
+                        df_show = (
+                            df_base[["Data", nome_coluna]]
+                            .rename(columns={nome_coluna: titulo})
+                            .set_index("Data")
+                        )
+
+                        # função para deixar a linha "Hoje" em negrito
+                        def destacar_hoje(row):
+                            return [
+                                "font-weight: 600" if row.name == "Hoje" else ""
+                                for _ in row
+                            ]
+
+                        styler = (
+                            df_show.style
+                            .format({titulo: "{:.4f}"})
+                            .apply(destacar_hoje, axis=1)
+                        )
+                        return styler
+
+                    # Tabela 1 – Prefixada (juro nominal)
+                    with col_pref:
+                        st.markdown("**Curva prefixada (juro nominal)**")
+                        styler_pref = montar_tabela_curva(
+                            df_var, "Juro Nominal (%)", "Curva prefixada (juro nominal)"
+                        )
+                        st.dataframe(styler_pref, use_container_width=True)
+
+                    # Tabela 2 – IPCA+ (juro real)
+                    with col_ipca:
+                        st.markdown("**Curva IPCA+ (juro real)**")
+                        styler_ipca = montar_tabela_curva(
+                            df_var, "Juro Real (%)", "Curva IPCA+ (juro real)"
+                        )
+                        st.dataframe(styler_ipca, use_container_width=True)
+
+                    # Tabela 3 – Breakeven
+                    with col_breakeven:
+                        st.markdown("**Breakeven (inflação implícita)**")
+                        styler_be = montar_tabela_curva(
+                            df_var, "Breakeven (%)", "Breakeven (inflação implícita)"
+                        )
+                        st.dataframe(styler_be, use_container_width=True)
+
                     st.caption(
-                        "Os níveis estão em % ao ano. A diferença entre as datas "
-                        "indica se a curva abriu ou fechou em cada horizonte "
-                        "(D-1, 1 semana, 1 mês, início do ano, 12 meses)."
+                        "Os níveis estão em % ao ano. A diferença entre as datas indica "
+                        "se a curva abriu ou fechou em cada horizonte (D-1, 1 semana, "
+                        "1 mês, início do ano, 12 meses)."
                     )
 
+                    
         # -------- Expectativas BR --------
         with subtab_exp_br:
             st.markdown("### Expectativas de mercado – Brasil (Focus)")

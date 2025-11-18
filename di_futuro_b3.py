@@ -101,10 +101,18 @@ def baixar_snapshot_di_futuro() -> pd.DataFrame:
         except Exception:
             vencimento = None
 
-        taxa = scty_qtn.get("curPrc")
-        variacao_bps = scty_qtn.get("prcFlcn")
+        # Pode não haver último negócio (curPrc) em alguns dias.
+        # Nesse caso, usamos o ajuste do dia anterior como proxy da taxa.
+        cur_prc = scty_qtn.get("curPrc")
         ajuste = scty_qtn.get("prvsDayAdjstmntPric")
-        pu = scty_qtn.get("curPrc")
+
+        if cur_prc is not None:
+            taxa = cur_prc
+        else:
+            taxa = ajuste  # fallback seguro para dias sem ULT
+
+        variacao_bps = scty_qtn.get("prcFlcn")
+        pu = cur_prc  # se quiser, pode manter o PU só com o último preço
 
         volume = asst_summary.get("traddCtrctsQty")
         open_interest = asst_summary.get("opnCtrcts")

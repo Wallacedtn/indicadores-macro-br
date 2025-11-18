@@ -3,39 +3,96 @@
 
 import os
 import io
-from datetime import datetime, timedelta
+import re
+from datetime import datetime, timedelta, date
+from typing import Optional, List
 
 import pandas as pd
 import requests
+import logging
+logging.basicConfig(level=logging.WARNING)
+
 
 # =============================================================================
-# CONFIGURAÇÃO DE PASTAS
+# CONFIGURAÇÃO DE PASTAS / ARQUIVOS
 # =============================================================================
 
 BASE_DIR = "data/curvas_anbima"
 os.makedirs(BASE_DIR, exist_ok=True)
 
-PATH_DI = os.path.join(BASE_DIR, "curva_di.csv")
-PATH_PREF = os.path.join(BASE_DIR, "curva_prefixada.csv")
-PATH_IPCA = os.path.join(BASE_DIR, "curva_ipca.csv")
+# Arquivo único com toda a informação de curva:
+# - data_curva: data efetiva da ETTJ (data da curva ANBIMA)
+# - data_ref  : dia em que o app rodou/baixou a curva
+# - PRAZO_DU  : prazo em dias úteis
+# - TAXA_PREF : juro nominal (% a.a.)
+# - TAXA_IPCA : juro real (% a.a.)
+PATH_FULL = os.path.join(BASE_DIR, "curvas_anbima_full.csv")
 
 
 # =============================================================================
-# FUNÇÕES AUXILIARES DE DOWNLOAD
+# HELPERS INTERNOS
 # =============================================================================
 
 
-def _baixar_curvas_zero(data: datetime) -> pd.DataFrame:
+def _log(msg: str, level="debug") -> None:
+    if level == "error":
+        logging.error(msg)
+    elif level == "warning":
+        logging.warning(msg)
+    else:
+        logging.debug(msg)
+
+
+
+def _converter_coluna_taxa_generica(serie: pd.Series) -> pd.Series:
+    """Converte série de taxas em float, aceitando formatos:
+    - '13,2697'
+    - '1.234,56'
+    - '13.2697'
     """
-    Baixa a Curva Zero (Prefixada + IPCA) da ANBIMA via endpoint CZ-down.asp
-    e devolve um DataFrame com colunas:
+    s = serie.astype(str).str.strip()
 
-        - PRAZO       (dias úteis até o vencimento)
-        - TAXA_PREF   (ETTJ Prefixada)
-        - TAXA_IPCA   (ETTJ IPCA)
+    # valores com vírgula -> remover ponto de milhar e trocar vírgula por ponto
+    mask_com_virgula = s.str.contains(",", regex=False)
+    s_conv = s.copy()
+    s_conv[mask_com_virgula] = (
+        s_conv[mask_com_virgula]
+        .str.replace(".", "", regex=False)
+        .str.replace(",", ".", regex=False)
+    )
+
+    return pd.to_numeric(s_conv, errors="coerce")
+
+
+def _extrair_data_curva(texto: str) -> Optional[date]:
+    """Tenta extrair a data efetiva da curva (data da ETTJ)
+    das primeiras linhas do arquivo da ANBIMA.
+
+    Não confiamos em 'hoje' como data da curva, porque o endpoint
+    CZ-down.asp sempre retorna a ÚLTIMA curva disponível.
+    """
+    for linha in texto.splitlines()[:10]:
+        # procura padrão DD/MM/AAAA
+        match = re.search(r"(\d{2}/\d{2}/\d{4})", linha)
+        if match:
+            try:
+                dt = datetime.strptime(match.group(1), "%d/%m/%Y").date()
+                return dt
+            except ValueError:
+                continue
+    return None
+
+
+def _baixar_curva_zero_ultima() -> pd.DataFrame:
+    """Baixa a Curva Zero ANBIMA (última disponível) e devolve
+    DataFrame com colunas numéricas:
+
+        - data_curva  (date)
+        - PRAZO_DU    (int, dias úteis)
+        - TAXA_PREF   (float, % a.a.)
+        - TAXA_IPCA   (float, % a.a.)
     """
     url = "https://www.anbima.com.br/informacoes/est-termo/CZ-down.asp"
-    dt_str = data.strftime("%d/%m/%Y")
 
     headers = {
         "User-Agent": (
@@ -45,318 +102,251 @@ def _baixar_curvas_zero(data: datetime) -> pd.DataFrame:
         )
     }
 
-    print(f"[ANBIMA] Baixando Curva Zero para {dt_str} em {url}")
+    _log(f"Baixando Curva Zero (última disponível) de {url}", level="debug")
 
     try:
-        resp = requests.post(
-            url,
-            headers=headers,
-            data={
-                "escolha": "2",   # Curva Zero
-                "Idioma": "PT",
-                "saida": "csv",
-                "Dt_Ref": dt_str,
-            },
-            timeout=30,
-        )
-    except Exception as e:
-        print(f"[ANBIMA] ERRO de conexão ao baixar Curva Zero {dt_str}: {e}")
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+    except Exception as e:  # noqa: BLE001
+        _log(f"Erro HTTP ao baixar Curva Zero: {e}")
         return pd.DataFrame()
 
-    print(f"[ANBIMA] Resposta HTTP {resp.status_code} para Curva Zero {dt_str}")
-
-    if resp.status_code != 200:
-        # Ex.: 404 se a data não tiver curva disponível
-        return pd.DataFrame()
+    _log(f"Resposta HTTP {resp.status_code} para Curva Zero", level="debug")
 
     texto = resp.text
-    linhas = texto.splitlines()
-
-    # Procura a parte que começa com "Vertices;ETTJ IPCA;ETTJ PREF;Inflação Implícita"
-    inicio = None
-    for i, linha in enumerate(linhas):
-        if linha.startswith("Vertices;"):
-            inicio = i
-            break
-
-    if inicio is None:
-        print("[ANBIMA] Não encontrei a seção de vértices na Curva Zero.")
+    if not texto.strip():
+        _log("Corpo da resposta vazio (nenhum texto).")
         return pd.DataFrame()
 
-    csv_curvas = "\n".join(linhas[inicio:])
+    # salva resposta crua para eventual debug
+    try:
+        os.makedirs(BASE_DIR, exist_ok=True)
+        debug_path = os.path.join(BASE_DIR, "debug_curva_zero_raw.csv")
+        with open(debug_path, "w", encoding="latin-1") as f:
+            f.write(texto)
+        _log(f"Resposta crua salva em {debug_path}", level="debug")
+    except Exception as e:  # noqa: BLE001
+        _log(f"Erro ao gravar arquivo de debug: {e}")
 
-    df = pd.read_csv(
-        io.StringIO(csv_curvas),
-        sep=";",
-        encoding="latin-1",
-        decimal=",",
-        thousands=".",
-    )
+    # tenta extrair a data efetiva da curva a partir do texto
+    data_curva = _extrair_data_curva(texto)
+    if data_curva is None:
+        # fallback: usa hoje como aproximação (não ideal, mas melhor que nada)
+        data_curva = datetime.now().date()
+        _log(
+            "Não foi possível identificar a data da curva no arquivo; "
+            "usando a data de hoje como 'data_curva'."
+        )
+    else:
+        _log(f"Data da curva identificada como {data_curva.strftime('%d/%m/%Y')}", level="debug")
 
-    # Renomeia colunas para algo mais amigável
-    df = df.rename(
-        columns={
-            "Vertices": "PRAZO",
-            "ETTJ PREF": "TAXA_PREF",
-            "ETTJ IPCA": "TAXA_IPCA",
-        }
-    )
+    # Lê os vértices da ETTJ:
+    # a estrutura usual é:
+    # - primeiras linhas: cabeçalho / parâmetros
+    # - linhas seguintes: vértices (prazo em DU e taxas)
+    try:
+        df_vertices = pd.read_csv(
+            io.StringIO(texto),
+            sep=";",
+            header=None,
+            encoding="latin-1",
+            skiprows=5,   # pula cabeçalho e parâmetros
+            nrows=69,     # número típico de vértices
+            names=["PRAZO", "TAXA_IPCA", "TAXA_PREF", "INFLACAO_IMPL"],
+        )
+    except Exception as e:  # noqa: BLE001
+        _log(f"Erro ao ler CSV da Curva Zero: {e}")
+        return pd.DataFrame()
 
-    # -------------------------------
-    # Limpa a coluna PRAZO:
-    # - transforma em string
-    # - tira espaços
-    # - remove ponto de milhar (ex: "1.008" -> "1008")
-    # - mantém só linhas em que PRAZO é numérico
-    # -------------------------------
-    serie_prazo = df["PRAZO"].astype(str).str.strip()
-    serie_prazo = serie_prazo.str.replace(".", "", regex=False)
+    # Limpa a coluna de PRAZO (pode vir como '1.008', etc.)
+    prazos_raw = df_vertices["PRAZO"].astype(str).str.strip()
+    prazos_raw = prazos_raw.str.replace(".", "", regex=False)
 
-    mask_numerico = serie_prazo.str.fullmatch(r"\d+")
-    df = df[mask_numerico].copy()
-    df["PRAZO"] = serie_prazo[mask_numerico].astype(int)
+    mask_num = prazos_raw.str.fullmatch(r"\d+")
+    df = df_vertices[mask_num].copy()
+    df["PRAZO_DU"] = prazos_raw[mask_num].astype(int)
+
+    # Converte taxas
+    df["TAXA_PREF"] = _converter_coluna_taxa_generica(df["TAXA_PREF"])
+    df["TAXA_IPCA"] = _converter_coluna_taxa_generica(df["TAXA_IPCA"])
+
+    df = df[["PRAZO_DU", "TAXA_PREF", "TAXA_IPCA"]].copy()
+    df = df.dropna(subset=["PRAZO_DU", "TAXA_PREF", "TAXA_IPCA"])
+
+    if df.empty:
+        _log("Curva Zero lida, mas sem linhas válidas após limpeza.")
+        return pd.DataFrame()
+
+    df = df.sort_values("PRAZO_DU").reset_index(drop=True)
+    df["data_curva"] = data_curva
+
+    # Reordena colunas para deixar data_curva primeiro
+    cols = ["data_curva", "PRAZO_DU", "TAXA_PREF", "TAXA_IPCA"]
+    df = df[cols]
 
     return df
 
 
-def _baixar_csv_anbima(tipo: str, data: datetime) -> pd.DataFrame:
+def _append_historico_full(df_new: pd.DataFrame) -> None:
+    """Anexa novas observações ao arquivo de histórico único,
+    garantindo que não haja duplicata por (data_curva, PRAZO_DU).
     """
-    Interface antiga, mas agora usando a Curva Zero nova.
-
-    tipo:
-        - "pref" -> curva prefixada (usa TAXA_PREF)
-        - "ipca" -> curva IPCA (usa TAXA_IPCA)
-        - "di"   -> por enquanto não implementamos via ANBIMA (devolve vazio)
-    """
-    # Por enquanto não buscamos DI soberano via ANBIMA aqui.
-    if tipo == "di":
-        print("[ANBIMA] Download de DI via ANBIMA desabilitado neste módulo.")
-        return pd.DataFrame()
-
-    df_curvas = _baixar_curvas_zero(data)
-
-    if df_curvas.empty:
-        return pd.DataFrame()
-
-    if tipo == "pref":
-        df_pref = df_curvas[["PRAZO", "TAXA_PREF"]].copy()
-        df_pref = df_pref.rename(columns={"TAXA_PREF": "TAXA"})
-        return df_pref
-
-    if tipo == "ipca":
-        df_ipca = df_curvas[["PRAZO", "TAXA_IPCA"]].copy()
-        df_ipca = df_ipca.rename(columns={"TAXA_IPCA": "TAXA"})
-        return df_ipca
-
-    raise ValueError("Tipo inválido para download ANBIMA (use 'di', 'pref' ou 'ipca').")
-
-
-def _append_historico(df_new: pd.DataFrame, path_csv: str) -> None:
-    """
-    Anexa histórico no CSV local sem duplicar datas/vértices.
-    Espera colunas:
-        - data_ref (date ou string)
-        - PRAZO   (dias úteis até o vencimento)
-    """
-    if df_new.empty:
+    if df_new is None or df_new.empty:
         return
 
-    if "data_ref" not in df_new.columns:
-        raise ValueError("df_new precisa ter coluna 'data_ref' antes de salvar o histórico.")
-
+    # Carrega histórico antigo, se existir
     try:
-        df_old = pd.read_csv(path_csv)
+        df_old = pd.read_csv(PATH_FULL, parse_dates=["data_curva"])
+        df_old["data_curva"] = df_old["data_curva"].dt.date
     except FileNotFoundError:
         df_old = pd.DataFrame()
 
+    # Concatena
     df_full = pd.concat([df_old, df_new], ignore_index=True)
 
-    if "data_ref" in df_full.columns:
-        df_full["data_ref"] = pd.to_datetime(df_full["data_ref"]).dt.date
+    # Garante tipos
+    if "data_curva" in df_full.columns:
+        df_full["data_curva"] = pd.to_datetime(df_full["data_curva"]).dt.date
 
-    if "PRAZO" not in df_full.columns:
-        raise ValueError("Coluna 'PRAZO' não encontrada no histórico ANBIMA.")
+    # Remove duplicatas por data_curva + PRAZO_DU
+    if {"data_curva", "PRAZO_DU"}.issubset(df_full.columns):
+        df_full.drop_duplicates(
+            subset=["data_curva", "PRAZO_DU"],
+            keep="last",
+            inplace=True,
+        )
 
-    df_full.drop_duplicates(
-        subset=["data_ref", "PRAZO"],
-        keep="last",
-        inplace=True,
+    df_full.to_csv(PATH_FULL, index=False, encoding="utf-8-sig")
+    _log(
+        f"Histórico atualizado em {PATH_FULL} "
+        f"({len(df_full)} linhas no total).", level="debug"
     )
 
-    df_full.to_csv(path_csv, index=False, encoding="utf-8-sig")
-
 
 # =============================================================================
-# HELPER PARA CONVERSÃO DA COLUNA TAXA
+# API PÚBLICA DO MÓDULO
 # =============================================================================
 
 
-def _converter_coluna_taxa(df: pd.DataFrame) -> None:
-    """
-    Converte a coluna 'TAXA' para float, aceitando:
-      - formato brasileiro:  '13,2697'  ou '1.234,56'
-      - formato com ponto:   '13.2697'
-    """
-    if "TAXA" not in df.columns:
-        return
+def atualizar_todas_as_curvas(data: Optional[datetime] = None) -> None:
+    """Atualiza o histórico local de curvas ANBIMA (prefixada e IPCA+).
 
-    s = df["TAXA"].astype(str).str.strip()
-
-    # valores com vírgula -> formato brasileiro
-    mask_com_virgula = s.str.contains(",", regex=False)
-
-    s_conv = s.copy()
-    s_conv[mask_com_virgula] = (
-        s_conv[mask_com_virgula]
-        .str.replace(".", "", regex=False)   # remove milhar
-        .str.replace(",", ".", regex=False)  # vírgula -> ponto
-    )
-
-    df["TAXA"] = pd.to_numeric(s_conv, errors="coerce")
-
-
-# =============================================================================
-# DOWNLOAD DIÁRIO
-# =============================================================================
-
-
-def atualizar_todas_as_curvas(data: datetime | None = None) -> None:
-    """
-    Baixa Prefixada e IPCA da data escolhida (ou hoje)
-    e atualiza o histórico local.
-
-    - Cria/atualiza:
-        data/curvas_anbima/curva_di.csv      (ainda vazio, por enquanto)
-        data/curvas_anbima/curva_prefixada.csv
-        data/curvas_anbima/curva_ipca.csv
+    Observações importantes:
+    - O parâmetro `data` aqui serve apenas como \"data de referência\" do download.
+      A data efetiva da curva (data_curva) vem do próprio arquivo CZ da ANBIMA.
+    - O endpoint CZ-down.asp SEMPRE devolve a última curva disponível,
+      não necessariamente a curva do dia em que o código está rodando.
     """
     if data is None:
         data = datetime.now()
 
     data_ref = data.date()
+    _log(f"Iniciando atualização de curvas ANBIMA (data_ref={data_ref})")
 
-    # DI fica desabilitado por enquanto
-    df_di = _baixar_csv_anbima("di", data)
-    df_pref = _baixar_csv_anbima("pref", data)
-    df_ipca = _baixar_csv_anbima("ipca", data)
+    df_curva = _baixar_curva_zero_ultima()
+    if df_curva.empty:
+        _log("Nenhuma nova curva ANBIMA foi adicionada (DataFrame vazio).")
+        return
 
-    if not df_di.empty:
-        df_di["data_ref"] = data_ref
-        _append_historico(df_di, PATH_DI)
+    # Adiciona coluna de data_ref (dia do download)
+    df_curva = df_curva.copy()
+    df_curva["data_ref"] = data_ref
 
-    if not df_pref.empty:
-        df_pref["data_ref"] = data_ref
-        _append_historico(df_pref, PATH_PREF)
-
-    if not df_ipca.empty:
-        df_ipca["data_ref"] = data_ref
-        _append_historico(df_ipca, PATH_IPCA)
+    _append_historico_full(df_curva)
 
 
 # =============================================================================
-# EXTRAÇÃO DOS VÉRTICES IMPORTANTES
+# EXTRAÇÃO DE VÉRTICES
 # =============================================================================
 
 
-def _extrair_vertice(df: pd.DataFrame, anos: int) -> float | None:
+def _extrair_vertice_dia(
+    df_dia: pd.DataFrame,
+    anos: int,
+    coluna_taxa: str,
+) -> Optional[float]:
+    """Dado um dia específico de curva (já filtrado por data_curva),
+    encontra o vértice mais próximo de `anos` (anos corridos aproximados),
+    usando PRAZO_DU/252 como proxy de anos.
     """
-    Pega o vértice mais próximo do prazo desejado (ano em número inteiro),
-    usando a coluna PRAZO (dias úteis).
-
-    Aqui nós garantimos que a coluna TAXA seja numérica,
-    mesmo que tenha vindo como texto com vírgula.
-    """
-    if df.empty:
+    if df_dia.empty:
         return None
 
-    if "PRAZO" not in df.columns or "TAXA" not in df.columns:
+    if "PRAZO_DU" not in df_dia.columns or coluna_taxa not in df_dia.columns:
         return None
 
-    df = df.copy()
+    df = df_dia.copy()
+    df[coluna_taxa] = pd.to_numeric(df[coluna_taxa], errors="coerce")
 
-    # Normaliza TAXA aqui também (camada extra de segurança)
-    s = df["TAXA"].astype(str).str.strip()
-    mask_com_virgula = s.str.contains(",", regex=False)
-
-    s_conv = s.copy()
-    s_conv[mask_com_virgula] = (
-        s_conv[mask_com_virgula]
-        .str.replace(".", "", regex=False)
-        .str.replace(",", ".", regex=False)
-    )
-
-    df["TAXA"] = pd.to_numeric(s_conv, errors="coerce")
-
-    # se tudo virou NaN, não tem o que fazer
-    if df["TAXA"].notna().sum() == 0:
+    if df[coluna_taxa].notna().sum() == 0:
         return None
 
-    df["anos"] = df["PRAZO"] / 252
-
-    alvo = anos
+    df["anos"] = df["PRAZO_DU"] / 252.0
+    alvo = float(anos)
     df["diff"] = (df["anos"] - alvo).abs()
     df = df.sort_values("diff")
 
-    valor = df.iloc[0]["TAXA"]
+    valor = df.iloc[0][coluna_taxa]
     return float(valor) if pd.notnull(valor) else None
 
 
+def _carregar_historico_full() -> pd.DataFrame:
+    """Carrega o histórico completo de curvas, se existir."""
+    try:
+        df = pd.read_csv(PATH_FULL, parse_dates=["data_curva"])
+    except FileNotFoundError:
+        return pd.DataFrame()
+
+    if df.empty:
+        return df
+
+    df["data_curva"] = df["data_curva"].dt.date
+    if "data_ref" in df.columns:
+        df["data_ref"] = pd.to_datetime(df["data_ref"]).dt.date
+    return df
+
+
 # =============================================================================
-# CURVA DE HOJE (NÍVEIS)
+# CURVA DE HOJE (NÍVEIS POR VÉRTICE)
 # =============================================================================
 
 
 def montar_curva_anbima_hoje() -> pd.DataFrame:
+    """Retorna uma tabela com:
+        - Data da curva (data_curva)
+        - Vértice (anos)  [2, 5, 10, 20]
+        - Juro Nominal (%)  [float]
+        - Juro Real (%)     [float]
+        - Breakeven (%)     [float]
+
+    A ideia é que esses valores sejam numéricos para facilitar gráficos
+    e cálculos. A formatação com '%' pode ser feita no Streamlit
+    (por exemplo, com df.style ou format_func).
     """
-    Retorna uma tabela consolidada com:
-        - Juro nominal (prefixado / MNP)
-        - Juro real (IPCA+ / MSN)
-        - Breakeven
-        - Para vértices de 2, 5, 10, 20 anos
-
-    Usa os CSVs históricos locais (curva_prefixada.csv e curva_ipca.csv)
-    e filtra para a data mais recente disponível, idealmente o dia atual.
-    """
-    hoje = datetime.now().date()
-
-    try:
-        df_pref = pd.read_csv(PATH_PREF)
-        df_ipca = pd.read_csv(PATH_IPCA)
-    except FileNotFoundError:
+    df_hist = _carregar_historico_full()
+    if df_hist.empty:
         return pd.DataFrame()
 
-    if df_pref.empty or df_ipca.empty:
+    # Usa a última data de curva disponível
+    data_mais_recente = df_hist["data_curva"].max()
+    if pd.isna(data_mais_recente):
         return pd.DataFrame()
 
-    # normaliza datas e TAXA
-    for df in (df_pref, df_ipca):
-        if "data_ref" not in df.columns:
-            return pd.DataFrame()
-        df["data_ref"] = pd.to_datetime(df["data_ref"]).dt.date
-        _converter_coluna_taxa(df)
-
-    data_disp_pref = df_pref["data_ref"].max()
-    data_disp_ipca = df_ipca["data_ref"].max()
-    data_max = min(data_disp_pref, data_disp_ipca)
-
-    data_ref = hoje if hoje <= data_max else data_max
-
-    df_pref_dia = df_pref[df_pref["data_ref"] == data_ref]
-    df_ipca_dia = df_ipca[df_ipca["data_ref"] == data_ref]
-
-    if df_pref_dia.empty and df_ipca_dia.empty:
-        return pd.DataFrame()
+    df_dia = df_hist[df_hist["data_curva"] == data_mais_recente].copy()
 
     vertices = [2, 5, 10, 20]
-    dados = []
+    linhas: List[dict] = []
 
     for v in vertices:
-        nominal = _extrair_vertice(df_pref_dia, v)
-        real = _extrair_vertice(df_ipca_dia, v)
-        breakeven = nominal - real if (nominal is not None and real is not None) else None
+        nominal = _extrair_vertice_dia(df_dia, v, "TAXA_PREF")
+        real = _extrair_vertice_dia(df_dia, v, "TAXA_IPCA")
+        breakeven = None
+        if nominal is not None and real is not None:
+            breakeven = nominal - real
 
-        dados.append(
+        linhas.append(
             {
+                "Data da curva": data_mais_recente,
                 "Vértice (anos)": v,
                 "Juro Nominal (%)": nominal,
                 "Juro Real (%)": real,
@@ -364,81 +354,81 @@ def montar_curva_anbima_hoje() -> pd.DataFrame:
             }
         )
 
-    df_out = pd.DataFrame(dados)
-
-    def fmt(x: float | None) -> str:
-        return f"{x:.3f}%" if pd.notnull(x) else "-"
-
-    for col in ["Juro Nominal (%)", "Juro Real (%)", "Breakeven (%)"]:
-        df_out[col] = df_out[col].apply(fmt)
-
+    df_out = pd.DataFrame(linhas)
     return df_out
 
 
 # =============================================================================
-# HISTÓRICO PARA ABERTURA / FECHAMENTO
+# HISTÓRICO PARA ABERTURA / FECHAMENTO (POR VÉRTICE)
 # =============================================================================
 
 
 def montar_curva_anbima_variacoes(anos: int) -> pd.DataFrame:
-    """
-    Retorna um histórico com:
-        - Hoje
-        - D-1
-        - 1 semana
-        - 1 mês
-        - Início do ano
-        - 12 meses
-        - Níveis em % (nominal, real e breakeven)
+    """Retorna um quadro estilo Focus com a curva ANBIMA em um vértice
+    específico (anos), para diferentes horizontes de comparação:
 
-    Apenas para um único vértice (anos = 2, 5, 10, 20...),
-    usando as curvas prefixada (MNP) e IPCA+ (MSN).
+        - Hoje       (última data de curva disponível)
+        - D-1        (curva anterior, se existir)
+        - 1 semana   (última curva com data_curva <= hoje-7dias)
+        - 1 mês      (<= hoje-30dias)
+        - Ano        (primeira curva do ano ou a mais próxima após 1/jan)
+        - 12 meses   (<= hoje-365dias)
+
+    As colunas retornadas são NÚMEROS (floats):
+
+        - Data
+        - Juro Nominal (%)
+        - Juro Real (%)
+        - Breakeven (%)
+
+    A formatação final com '%' fica a cargo da camada de apresentação
+    (Streamlit, etc.).
     """
-    try:
-        df_pref = pd.read_csv(PATH_PREF)
-        df_ipca = pd.read_csv(PATH_IPCA)
-    except FileNotFoundError:
+    df_hist = _carregar_historico_full()
+    if df_hist.empty:
         return pd.DataFrame()
 
-    if df_pref.empty or df_ipca.empty:
+    if "data_curva" not in df_hist.columns:
         return pd.DataFrame()
 
-    # normaliza datas e TAXA
-    for df in (df_pref, df_ipca):
-        if "data_ref" not in df.columns:
-            return pd.DataFrame()
-        df["data_ref"] = pd.to_datetime(df["data_ref"]).dt.date
-        _converter_coluna_taxa(df)
-
-    hoje = df_pref["data_ref"].max()
+    hoje = df_hist["data_curva"].max()
     if pd.isna(hoje):
         return pd.DataFrame()
 
-    datas = {
+    # dicionário de datas-alvo para comparação
+    datas_alvo = {
         "Hoje": hoje,
         "D-1": hoje - timedelta(days=1),
         "1 semana": hoje - timedelta(days=7),
         "1 mês": hoje - timedelta(days=30),
-        "Ano": datetime(hoje.year, 1, 1).date(),
+        "Ano": date(hoje.year, 1, 1),
         "12 meses": hoje - timedelta(days=365),
     }
 
-    def get_taxa(df: pd.DataFrame, dt) -> float | None:
-        df2 = df[df["data_ref"] <= dt]
-        if df2.empty:
-            return None
-        return _extrair_vertice(df2, anos)
+    linhas: List[dict] = []
 
-    linhas = []
+    for rotulo, dt_alvo in datas_alvo.items():
+        # Seleciona a última data_curva <= dt_alvo
+        mask = df_hist["data_curva"] <= dt_alvo
+        df_cand = df_hist[mask]
 
-    for nome, dt in datas.items():
-        nominal = get_taxa(df_pref, dt)
-        real = get_taxa(df_ipca, dt)
-        breakeven = nominal - real if (nominal is not None and real is not None) else None
+        if df_cand.empty:
+            nominal = None
+            real = None
+            breakeven = None
+        else:
+            data_ref = df_cand["data_curva"].max()
+            df_dia = df_cand[df_cand["data_curva"] == data_ref]
+
+            nominal = _extrair_vertice_dia(df_dia, anos, "TAXA_PREF")
+            real = _extrair_vertice_dia(df_dia, anos, "TAXA_IPCA")
+            breakeven = None
+            if nominal is not None and real is not None:
+                breakeven = nominal - real
 
         linhas.append(
             {
-                "Data": nome,
+                "Data": rotulo,
                 "Juro Nominal (%)": nominal,
                 "Juro Real (%)": real,
                 "Breakeven (%)": breakeven,
@@ -446,11 +436,54 @@ def montar_curva_anbima_variacoes(anos: int) -> pd.DataFrame:
         )
 
     df_out = pd.DataFrame(linhas)
+    return df_out
 
-    def to_fmt(x: float | None) -> str:
-        return f"{x:.3f}%" if pd.notnull(x) else "-"
 
-    for col in ["Juro Nominal (%)", "Juro Real (%)", "Breakeven (%)"]:
-        df_out[col] = df_out[col].apply(to_fmt)
+# =============================================================================
+# HELPERS OPCIONAIS DE FORMATAÇÃO
+# =============================================================================
+
+
+def formatar_percentuais(
+    df: pd.DataFrame,
+    colunas: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """Devolve uma cópia do DataFrame com as colunas indicadas formatadas
+    como string \"X.XXX%\" (3 casas decimais). Útil para exibir no Streamlit.
+
+    Exemplo de uso:
+        df = montar_curva_anbima_hoje()
+        df_fmt = formatar_percentuais(
+            df,
+            colunas=[\"Juro Nominal (%)\", \"Juro Real (%)\", \"Breakeven (%)\"],
+        )
+    """
+    if colunas is None:
+        # por padrão, tenta aplicar nas 3 colunas padrão se existirem
+        colunas = [
+            "Juro Nominal (%)",
+            "Juro Real (%)",
+            "Breakeven (%)",
+        ]
+
+    df_out = df.copy()
+
+    for col in colunas:
+        if col not in df_out.columns:
+            continue
+
+        def _fmt(x: Optional[float]) -> str:
+            if x is None or pd.isna(x):
+                return "-"
+            return f"{x:.3f}%"
+
+        df_out[col] = df_out[col].apply(_fmt)
 
     return df_out
+
+
+if __name__ == "__main__":
+    # Pequeno teste rápido de linha de comando.
+    atualizar_todas_as_curvas()
+    print(montar_curva_anbima_hoje())
+    print(montar_curva_anbima_variacoes(anos=5))
