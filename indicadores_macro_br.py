@@ -1833,7 +1833,7 @@ def render_bloco1_observatorio_mercado(
                 # apenas escolhemos o vértice
                 vertice = st.selectbox(
                     "Vértice (anos)",
-                    options=[2, 5, 10, 20],
+                    options=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30],
                     index=1,  # 2 anos como padrão
                     format_func=lambda x: f"{x} anos",
                 )

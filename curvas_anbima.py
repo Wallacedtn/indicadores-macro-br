@@ -260,19 +260,25 @@ def atualizar_todas_as_curvas(data: Optional[datetime] = None) -> None:
 # =============================================================================
 
 
+# =============================================================================
+# EXTRAÇÃO DE VÉRTICES
+# =============================================================================
+
+
 def _extrair_vertice_dia(
     df_dia: pd.DataFrame,
     anos: int,
     coluna_taxa: str,
 ) -> Optional[float]:
-    """Dado um dia específico de curva (já filtrado por data_curva),
-    encontra o vértice mais próximo de `anos` (anos corridos aproximados),
-    usando PRAZO_DU/252 como proxy de anos.
     """
-    if df_dia.empty:
-        return None
+    Extrai a taxa para um vértice específico em anos,
+    usando interpolação linear em dias úteis.
 
-    if "PRAZO_DU" not in df_dia.columns or coluna_taxa not in df_dia.columns:
+    - Se existir PRAZO_DU exato -> usa.
+    - Se existir intervalo envolvendo o prazo -> interpola.
+    - Se não houver intervalo -> usa o mais próximo (fallback).
+    """
+    if df_dia.empty or "PRAZO_DU" not in df_dia.columns:
         return None
 
     df = df_dia.copy()
@@ -281,11 +287,32 @@ def _extrair_vertice_dia(
     if df[coluna_taxa].notna().sum() == 0:
         return None
 
-    df["anos"] = df["PRAZO_DU"] / 252.0
-    alvo = float(anos)
-    df["diff"] = (df["anos"] - alvo).abs()
-    df = df.sort_values("diff")
+    # alvo em dias úteis (aprox. 252 DU por ano)
+    alvo_du = int(round(anos * 252))
 
+    df = df.sort_values("PRAZO_DU")
+
+    # 1) Se existir prazo exatamente igual
+    if alvo_du in df["PRAZO_DU"].values:
+        return float(df.loc[df["PRAZO_DU"] == alvo_du, coluna_taxa].iloc[0])
+
+    # 2) Buscar intervalo para interpolação
+    antes = df[df["PRAZO_DU"] < alvo_du].tail(1)
+    depois = df[df["PRAZO_DU"] > alvo_du].head(1)
+
+    if not antes.empty and not depois.empty:
+        # Interpolação linear em PRAZO_DU
+        x0 = antes["PRAZO_DU"].iloc[0]
+        x1 = depois["PRAZO_DU"].iloc[0]
+        y0 = antes[coluna_taxa].iloc[0]
+        y1 = depois[coluna_taxa].iloc[0]
+
+        y = y0 + (y1 - y0) * ((alvo_du - x0) / (x1 - x0))
+        return float(y)
+
+    # 3) Fallback: usa o mais próximo (somente nos extremos da curva)
+    df["diff"] = (df["PRAZO_DU"] - alvo_du).abs()
+    df = df.sort_values("diff")
     valor = df.iloc[0][coluna_taxa]
     return float(valor) if pd.notnull(valor) else None
 
@@ -312,29 +339,29 @@ def _carregar_historico_full() -> pd.DataFrame:
 
 
 def montar_curva_anbima_hoje() -> pd.DataFrame:
-    """Retorna uma tabela com:
+    """
+    Retorna uma tabela com:
         - Data da curva (data_curva)
-        - Vértice (anos)  [2, 5, 10, 20]
-        - Juro Nominal (%)  [float]
-        - Juro Real (%)     [float]
-        - Breakeven (%)     [float]
+        - Vértice (anos)     [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30]
+        - Juro Nominal (%)
+        - Juro Real (%)
+        - Breakeven (%)
 
-    A ideia é que esses valores sejam numéricos para facilitar gráficos
-    e cálculos. A formatação com '%' pode ser feita no Streamlit
-    (por exemplo, com df.style ou format_func).
+    Todos os valores são numéricos. A formatação com '%' fica para a camada
+    de apresentação (Streamlit).
     """
     df_hist = _carregar_historico_full()
     if df_hist.empty:
         return pd.DataFrame()
 
-    # Usa a última data de curva disponível
     data_mais_recente = df_hist["data_curva"].max()
     if pd.isna(data_mais_recente):
         return pd.DataFrame()
 
     df_dia = df_hist[df_hist["data_curva"] == data_mais_recente].copy()
 
-    vertices = [2, 5, 10, 20]
+    # mesmos vértices que você colocou no selectbox
+    vertices = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30]
     linhas: List[dict] = []
 
     for v in vertices:
@@ -356,6 +383,7 @@ def montar_curva_anbima_hoje() -> pd.DataFrame:
 
     df_out = pd.DataFrame(linhas)
     return df_out
+
 
 
 # =============================================================================
