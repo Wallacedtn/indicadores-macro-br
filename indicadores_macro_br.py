@@ -1526,21 +1526,21 @@ def render_bloco1_observatorio_mercado(
             st.markdown("**Taxa básica – Selic Meta**")
             st.dataframe(
                 df_selic.set_index("Indicador"),
-                width="stretch",
+                use_container_width=True,
             )
 
             # CDI
             st.markdown("**CDI – Retorno acumulado**")
             st.dataframe(
                 df_cdi.set_index("Indicador"),
-                width="stretch",
+                use_container_width=True,
             )
 
             # Câmbio
             st.markdown("**Câmbio – Dólar PTAX (venda)**")
             st.dataframe(
                 df_ptax.set_index("Indicador"),
-                width="stretch",
+                use_container_width=True,
             )
 
             # ---------------------------------------------
@@ -1798,7 +1798,8 @@ def render_bloco1_observatorio_mercado(
                                 pd.DataFrame(linhas_resumo)
                                 .set_index("Contrato")
                             )
-                            st.dataframe(df_resumo, width="stretch")
+                            st.dataframe(df_resumo, use_container_width=True
+)
                         else:
                             st.info(
                                 "Ainda não há histórico suficiente para montar o resumo "
@@ -1922,7 +1923,7 @@ def render_bloco1_observatorio_mercado(
             )
             st.dataframe(
                 df_focus.set_index("Indicador"),
-                width="stretch",
+                use_container_width=True,
             )
 
             st.markdown("**Focus – Top 5 (instituições mais assertivas)**")
@@ -1931,7 +1932,7 @@ def render_bloco1_observatorio_mercado(
             )
             st.dataframe(
                 df_focus_top5.set_index("Indicador"),
-                width="stretch",
+                use_container_width=True,
             )
 
     # ==========================
@@ -2011,7 +2012,7 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
 
     st.dataframe(
         df_exibir.set_index(["Indicador", "Classificação"]),
-        width="stretch",
+        use_container_width=True,
     )
 
     st.info(
@@ -2026,7 +2027,7 @@ def render_bloco6_inflacao(df_infla: pd.DataFrame):
     st.caption("Inflação cheia e IPCA-15: mensal, acumulado no ano e em 12 meses.")
     st.dataframe(
         df_infla.set_index("Indicador"),
-        width="stretch",
+        use_container_width=True,
     )
 
     st.info(
