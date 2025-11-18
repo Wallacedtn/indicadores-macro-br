@@ -1719,14 +1719,20 @@ def render_bloco1_observatorio_mercado(
                                 )
                             )
 
-                            chart = chart_line + chart_points
+                                   # Combina linha + pontos e ajusta tamanho do gráfico
+                            chart = (chart_line + chart_points).properties(
+                                height=420  # aumenta a altura
+                            )
 
-                            st.altair_chart(chart)
+                            # Faz o gráfico ocupar toda a largura disponível
+                            st.altair_chart(chart, use_container_width=True)
+
                             st.caption(
                                 "Evolução da taxa implícita (% a.a.) dos contratos DI1 "
                                 "mais líquidos (um por ano, próximos 5 anos), "
                                 "com base no histórico salvo em CSV."
                             )
+
                         else:
                             st.info(
                                 "Ainda não há observações suficientes para exibir o gráfico."
