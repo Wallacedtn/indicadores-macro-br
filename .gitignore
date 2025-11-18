@@ -18,5 +18,3 @@ __pycache__/
 # Arquivos temporários criados por Streamlit
 .streamlit/
 
-# Pastas que não precisam ir para o GitHub
-data/
