@@ -174,18 +174,28 @@ def atualizar_historico_di_futuro(caminho: str = HIST_PATH) -> pd.DataFrame:
 
     # Converte a data do novo snapshot
     df_novo["data"] = pd.to_datetime(df_novo["data"]).dt.date
-
-    # 🔥 REMOÇÃO CRÍTICA PARA ACABAR COM O FUTUREWARNING 🔥
-    df_old = df_old.dropna(axis=1, how="all")
-    df_novo = df_novo.dropna(axis=1, how="all")
-
+    
     # Agora garantimos que AMBOS têm as mesmas colunas
     colunas_final = sorted(set(df_old.columns).union(set(df_novo.columns)))
     df_old = df_old.reindex(columns=colunas_final)
     df_novo = df_novo.reindex(columns=colunas_final)
 
-    # Concatena com segurança (sem warnings)
-    df = pd.concat([df_old, df_novo], ignore_index=True)
+    # Concatena com segurança (evita empty / all-NA)
+    frames_raw = [df_old, df_novo]
+    frames = []
+
+    for f in frames_raw:
+        if f is None or f.empty:
+            continue
+        # remove colunas 100% NaN para manter o comportamento antigo do pandas
+        f_clean = f.dropna(axis=1, how="all")
+        frames.append(f_clean)
+
+    if len(frames) > 0:
+        df = pd.concat(frames, ignore_index=True)
+    else:
+        # histórico totalmente vazio
+        df = pd.DataFrame()
 
     # Remove duplicatas (mesma data + mesmo ticker)
     df = df.drop_duplicates(subset=["data", "ticker"], keep="last")

@@ -1,13 +1,14 @@
 # indicadores_macro_br.py
 # -*- coding: utf-8 -*-
 
+import altair as alt
 import requests
 import pandas as pd
 import unicodedata
 from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 import streamlit as st
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 from functools import lru_cache
 from curvas_anbima import (
     atualizar_todas_as_curvas,
@@ -18,6 +19,11 @@ from di_futuro_b3 import (
     atualizar_historico_di_futuro,
     carregar_historico_di_futuro,
 )
+import warnings
+
+# Remove o aviso do 'use_container_width'
+warnings.filterwarnings("ignore", message=".*use_container_width.*")
+
 
 
 # =============================================================================
@@ -805,17 +811,38 @@ def buscar_focus_top5_expectativa_anual(
 
 def montar_tabela_focus() -> pd.DataFrame:
     """
-    Monta a tabela de expectativas anuais para IPCA, PIB, Selic e câmbio
-    usando o recurso ExpectativasMercadoAnuais.
-    """
-    ano_atual = datetime.now().year
-    anos = [ano_atual, ano_atual + 1]
+    Monta a tabela consolidada de expectativas Focus por ano
+    para os principais indicadores macro.
 
-    configs = [
-        ("IPCA (a.a.)", "ipca", None, True),
-        ("PIB Total (var.% a.a.)", "pib total", None, True),
-        ("Selic (a.a.)", "selic", None, False),
-        ("Câmbio (R$/US$)", "cambio", None, False),
+    Usa a função buscar_focus_expectativa_anual(indicador_substr, ano_desejado, detalhe_substr)
+    para extrair a mediana de cada indicador / ano.
+    """
+
+    # anos que você quer mostrar (igual ao Focus)
+    anos = [2025, 2026, 2027, 2028]
+
+    # Cada tupla é:
+    # (nome que aparece na tabela,
+    #  substring do indicador na base do Focus,
+    #  substring de detalhe (se precisar filtrar mais),
+    #  se é percentual para formatar com "%")
+    configs: List[Tuple[str, str, Optional[str], bool]] = [
+        # Os 4 que você já tinha:
+        ("IPCA (variação %)",                 "IPCA",                    None, True),
+        ("PIB Total (variação %)",            "PIB Total",               None, True),
+        ("Câmbio (R$/US$)",                   "Câmbio",                  None, False),
+        ("Selic (% a.a)",                     "Selic",                   None, True),
+
+        # Extras semelhantes ao quadro do Focus:
+        ("IGP-M (variação %)",                "IGP-M",                   None, True),
+        ("IPCA Administrados (variação %)",   "IPCA Administrados",      None, True),
+        ("Conta corrente (US$ bilhões)",      "Conta corrente",          None, False),
+        ("Balança comercial (US$ bilhões)",   "Balança comercial",       None, False),
+        ("Investimento direto no país (US$ bi)", "Investimento direto",  None, False),
+        ("Dívida líquida do setor público (% do PIB)",
+                                             "Dívida líquida do setor público", None, True),
+        ("Resultado primário (% do PIB)",     "Resultado primário",      None, True),
+        ("Resultado nominal (% do PIB)",      "Resultado nominal",       None, True),
     ]
 
     linhas: List[Dict[str, str]] = []
@@ -824,20 +851,27 @@ def montar_tabela_focus() -> pd.DataFrame:
         linha: Dict[str, str] = {"Indicador": nome_exibicao}
 
         for ano in anos:
+            # >>> IMPORTANTE: chamada SOMENTE POR POSIÇÃO <<<
+            # evita o erro: got an unexpected keyword argument 'ano'
             valor = buscar_focus_expectativa_anual(indicador_sub, ano, detalhe_sub)
 
-            if isinstance(valor, (int, float)):
-                if eh_percentual:
-                    linha[str(ano)] = f"{valor:.2f}%"
-                else:
-                    linha[str(ano)] = f"{valor:.2f}"
+            if valor is None:
+                texto = "-"
             else:
-                linha[str(ano)] = valor
+                if eh_percentual:
+                    texto = f"{valor:.2f}%"
+                else:
+                    # aqui você pode adaptar para bi/trilhões se quiser
+                    texto = f"{valor:.2f}"
 
-        linha["Fonte"] = "BCB / Focus – Expectativas de Mercado Anuais"
+            linha[str(ano)] = texto
+
         linhas.append(linha)
 
-    return pd.DataFrame(linhas)
+    df_focus = pd.DataFrame(linhas)
+    # garante a ordem das colunas
+    df_focus = df_focus[["Indicador"] + [str(a) for a in anos]]
+    return df_focus
 
 
 def montar_tabela_focus_top5() -> pd.DataFrame:
@@ -1467,14 +1501,13 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
 
     return pd.DataFrame(linhas)
 
-
 def render_bloco1_observatorio_mercado(
     df_focus,
     df_focus_top5,
     df_selic,
     df_cdi,
     df_ptax,
-    df_di_fut,
+    df_di_fut,   # ainda passo, mas não uso mais a tabela diária
     df_hist_di,
 ):
     """
@@ -1482,8 +1515,7 @@ def render_bloco1_observatorio_mercado(
     - Aba "Brasil"
         - Sub-aba "Curto prazo":
             - Selic Meta, CDI acumulado e câmbio PTAX
-            - Curva de juros – DI Futuro (B3)
-            - Histórico DI Futuro (B3)
+            - Histórico DI Futuro (B3) com gráfico + tabela semanal (hoje, 1–4 semanas)
             - Curva de juros – ANBIMA (prefixado x IPCA+)
         - Sub-aba "Expectativas":
             - Focus – Mediana (consenso do mercado)
@@ -1505,8 +1537,7 @@ def render_bloco1_observatorio_mercado(
         with subtab_indic_br:
             st.markdown("### Indicadores de curto prazo – Brasil")
             st.caption(
-                "Selic Meta, CDI acumulado, câmbio PTAX e curvas de juros "
-                "(DI Futuro na B3 e ANBIMA prefixado x IPCA+), "
+                "Selic Meta, CDI acumulado, câmbio PTAX e DI Futuro (histórico), "
                 "com foco em leitura de curto e médio prazo."
             )
 
@@ -1531,23 +1562,12 @@ def render_bloco1_observatorio_mercado(
                 width="stretch",
             )
 
-            # Curva DI Futuro (snapshot de hoje)
-            st.markdown("**Curva de juros – DI Futuro (B3)**")
-            st.caption(
-                "Principais vencimentos do contrato DI1, com taxa implícita anualizada "
-                "e variação em basis points."
-            )
-            st.dataframe(
-                df_di_fut.set_index("Contrato"),
-                width="stretch",
-            )
-
-            # -------------------------------
-            # Histórico – DI Futuro (B3) – opcional, em expander
-            # -------------------------------
+            # ---------------------------------------------
+            # Histórico – DI Futuro (B3) – 1 contrato por ano, próximos 5 anos
+            # ---------------------------------------------
             st.markdown("**Histórico – DI Futuro (B3)**")
             with st.expander(
-                "Ver evolução histórica da taxa por contrato (opcional)"
+                "Ver evolução histórica da taxa (1 contrato por ano, próximos 5 anos)"
             ):
                 if df_hist_di is None or df_hist_di.empty:
                     st.info(
@@ -1556,79 +1576,217 @@ def render_bloco1_observatorio_mercado(
                         "acumulando as observações no arquivo "
                         "`data/di_futuro/di1_historico.csv`."
                     )
-                    df_sel = None
                 else:
-                    # garante ordenação por data
+                    # cópia ordenada por data
                     df_hist = df_hist_di.copy()
                     df_hist["data"] = pd.to_datetime(df_hist["data"])
                     df_hist = df_hist.sort_values("data")
 
-                    # lista de tickers disponíveis
-                    tickers = sorted(df_hist["ticker"].unique())
-
-                    # tenta deixar DI1Z25 como padrão, se existir
-                    idx_default = (
-                        tickers.index("DI1Z25") if "DI1Z25" in tickers else 0
-                    )
-
-                    contrato_sel = st.selectbox(
-                        "Selecione o contrato DI1 para análise histórica",
-                        options=tickers,
-                        index=idx_default,
-                    )
-
-                    df_sel = df_hist[df_hist["ticker"] == contrato_sel].copy()
-                    df_sel = df_sel.set_index("data")
-
-                    # gráfico da taxa
-                    st.line_chart(
-                        df_sel[["taxa"]],
-                        width="stretch",
-                    )
-
-                    st.caption(
-                        "Taxa implícita do contrato selecionado (% a.a.), "
-                        "com base no histórico salvo em CSV."
-                    )
-
-                    # -----------------------
-                    # Últimas observações
-                    # -----------------------
-                    st.markdown("Últimas observações:")
-
-                    colunas_base = ["taxa", "variacao_bps", "volume"]
-                    colunas_existentes = [
-                        c for c in colunas_base if c in df_sel.columns
-                    ]
-
-                    if colunas_existentes:
-                        mapa_renome = {
-                            "taxa": "Taxa (%)",
-                            "variacao_bps": "Var. (bps)",
-                            "volume": "Volume",
-                        }
-
-                        df_ultimas = (
-                            df_sel[colunas_existentes]
-                            .tail(10)
-                            .rename(
-                                columns={
-                                    c: mapa_renome[c]
-                                    for c in colunas_existentes
-                                }
-                            )
-                        )
-
-                        st.dataframe(
-                            df_ultimas,
-                            width="stretch",
+                    # garante coluna de volume numérica (se existir)
+                    if "volume" in df_hist.columns:
+                        df_hist["volume"] = pd.to_numeric(
+                            df_hist["volume"], errors="coerce"
                         )
                     else:
+                        df_hist["volume"] = pd.NA
+
+                    # --------------------------------------
+                    # Extrai o ano de vencimento do ticker (ex.: DI1F26 -> 2026)
+                    # --------------------------------------
+                    def _extrair_ano(ticker: str) -> Optional[int]:
+                        if not isinstance(ticker, str) or len(ticker) < 2:
+                            return None
+                        sufixo = ticker[-2:]
+                        if sufixo.isdigit():
+                            return 2000 + int(sufixo)
+                        return None
+
+                    df_hist["ano_venc"] = df_hist["ticker"].apply(_extrair_ano)
+
+                    # Ano de referência = ano da última data observada
+                    ano_ref = int(df_hist["data"].max().year)
+                    anos_desejados = [ano_ref + i for i in range(5)]
+
+                    # Ordem dos meses da B3 (pra fallback de liquidez)
+                    ordem_meses = "FGHJKMNQUVXZ"
+
+                    tickers_ancora: List[str] = []
+
+                    for ano in anos_desejados:
+                        df_ano = df_hist[df_hist["ano_venc"] == ano]
+                        if df_ano.empty:
+                            continue
+
+                        # Agrupa por ticker e calcula volume médio recente (últimos 20 dias)
+                        candidatos: List[tuple[str, float]] = []
+                        for t, df_t in df_ano.groupby("ticker"):
+                            serie_vol = df_t.sort_values("data")["volume"].tail(20)
+                            vol_medio = serie_vol.mean()
+                            candidatos.append((t, vol_medio))
+
+                        # Se não tiver volume confiável, usa fallback por mês (F, G, H...)
+                        candidatos_validos = [c for c in candidatos if pd.notna(c[1])]
+
+                        if candidatos_validos:
+                            # escolhe o maior volume médio
+                            ticker_escolhido = max(
+                                candidatos_validos, key=lambda x: x[1]
+                            )[0]
+                        else:
+                            # fallback: menor mês na ordem FGHI...
+                            melhor = None
+                            melhor_idx = 999
+                            for t, _ in candidatos:
+                                mes_code = t[-3:-2]  # letra do mês
+                                try:
+                                    idx_mes = ordem_meses.index(mes_code)
+                                except ValueError:
+                                    idx_mes = 999
+                                if idx_mes < melhor_idx:
+                                    melhor_idx = idx_mes
+                                    melhor = t
+                            ticker_escolhido = melhor
+
+                        if ticker_escolhido and ticker_escolhido not in tickers_ancora:
+                            tickers_ancora.append(ticker_escolhido)
+
+                    if not tickers_ancora:
                         st.info(
-                            "Ainda não há colunas suficientes no histórico para montar a "
-                            "tabela de últimas observações (ex.: 'variacao_bps' ou "
-                            "'volume')."
+                            "Não foi possível identificar contratos DI1 suficientes "
+                            "para os próximos 5 anos no histórico."
                         )
+                    else:
+                        st.markdown(
+                            "Contratos considerados (1 por ano, mais líquidos): "
+                            + ", ".join(tickers_ancora)
+                        )
+
+                        # --------------------------------------
+                        # Gráfico: contratos âncora (linha + bolinha)
+                        # --------------------------------------
+                        df_plot = (
+                            df_hist[df_hist["ticker"].isin(tickers_ancora)]
+                            .pivot(index="data", columns="ticker", values="taxa")
+                            .sort_index()
+                        )
+
+                        if df_plot.shape[0] >= 2:
+                            df_long = (
+                                df_plot.reset_index()
+                                .melt(
+                                    id_vars="data",
+                                    var_name="Contrato",
+                                    value_name="Taxa",
+                                )
+                                .dropna(subset=["Taxa"])
+                            )
+
+                            chart_line = (
+                                alt.Chart(df_long)
+                                .mark_line()
+                                .encode(
+                                    x=alt.X("data:T", title="Data"),
+                                    y=alt.Y(
+                                        "Taxa:Q",
+                                        title="Taxa (% a.a.)",
+                                    ),
+                                    color=alt.Color(
+                                        "Contrato:N", title="Contrato"
+                                    ),
+                                )
+                            )
+
+                            chart_points = (
+                                alt.Chart(df_long)
+                                .mark_point(size=40)
+                                .encode(
+                                    x="data:T",
+                                    y="Taxa:Q",
+                                    color="Contrato:N",
+                                    tooltip=[
+                                        "Contrato:N",
+                                        alt.Tooltip("data:T", title="Data"),
+                                        alt.Tooltip(
+                                            "Taxa:Q",
+                                            title="Taxa (% a.a.)",
+                                            format=".4f",
+                                        ),
+                                    ],
+                                )
+                            )
+
+                            chart = chart_line + chart_points
+
+                            st.altair_chart(chart)
+                            st.caption(
+                                "Evolução da taxa implícita (% a.a.) dos contratos DI1 "
+                                "mais líquidos (um por ano, próximos 5 anos), "
+                                "com base no histórico salvo em CSV."
+                            )
+                        else:
+                            st.info(
+                                "Ainda não há observações suficientes para exibir o gráfico."
+                            )
+
+                        # --------------------------------------
+                        # Tabela estilo Focus – Hoje, 1–4 semanas, por contrato
+                        # --------------------------------------
+                        st.markdown(
+                            "**Resumo semanal da taxa (Hoje, 1–4 semanas atrás, por contrato)**"
+                        )
+
+                        linhas_resumo: List[Dict[str, str]] = []
+
+                        for ticker in tickers_ancora:
+                            serie = (
+                                df_hist[df_hist["ticker"] == ticker]
+                                .set_index("data")["taxa"]
+                                .sort_index()
+                            )
+                            if serie.empty:
+                                continue
+
+                            datas = serie.index
+                            data_hoje = datas.max()
+                            taxa_hoje = float(serie.loc[data_hoje])
+
+                            linha: Dict[str, str] = {
+                                "Contrato": ticker,
+                                "Data hoje": data_hoje.strftime("%d/%m/%Y"),
+                                "Hoje": f"{taxa_hoje:.4f}%",
+                            }
+
+                            horizontes = [
+                                ("Há 1 semana", 1),
+                                ("Há 2 semanas", 2),
+                                ("Há 3 semanas", 3),
+                                ("Há 4 semanas", 4),
+                            ]
+
+                            for rotulo, n_sem in horizontes:
+                                alvo = data_hoje - relativedelta(weeks=n_sem)
+                                datas_validas = datas[datas <= alvo]
+
+                                if len(datas_validas) == 0:
+                                    linha[rotulo] = "-"
+                                else:
+                                    data_ref = datas_validas.max()
+                                    taxa_ref = float(serie.loc[data_ref])
+                                    linha[rotulo] = f"{taxa_ref:.4f}%"
+
+                            linhas_resumo.append(linha)
+
+                        if linhas_resumo:
+                            df_resumo = (
+                                pd.DataFrame(linhas_resumo)
+                                .set_index("Contrato")
+                            )
+                            st.dataframe(df_resumo, width="stretch")
+                        else:
+                            st.info(
+                                "Ainda não há histórico suficiente para montar o resumo "
+                                "em janelas semanais para esses contratos."
+                            )
 
             # -------------------------------
             # Curva de juros – ANBIMA
@@ -1744,6 +1902,7 @@ def render_bloco1_observatorio_mercado(
                 "Aqui futuramente entram projeções do FMI/OCDE, Fed funds implícito, "
                 "inflação esperada nos EUA/Europa etc."
             )
+
 
 
 def render_bloco2_fiscal():
