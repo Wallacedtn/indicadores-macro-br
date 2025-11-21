@@ -386,45 +386,49 @@ div[data-baseweb="menu"] * {
     background-color: transparent !important;
 }
 
-/* ===========================================================
-   CORREÇÃO FINAL PARA SELECTBOX – Streamlit / BaseWeb
-   =========================================================== */
+/* ===========================
+   RADIO COMO CHIPS (VÉRTICE ANBIMA)
+   =========================== */
 
-/* 1. Remover regras que quebram posicionamento */
-div[data-baseweb="menu"] * {
-    background-color: transparent !important;
+[data-testid="stRadio"]>div {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
 }
 
-/* 2. Estilo visual correto do popover (sem tocar em layout) */
-div[data-baseweb="popover"]>div {
-    background: linear-gradient(135deg, var(--ion-panel-1), var(--ion-panel-2)) !important;
-    border: 1px solid var(--ion-border-soft) !important;
-    border-radius: 10px !important;
-    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45) !important;
+[data-testid="stRadio"] label {
+    border-radius: 999px;
+    padding: 0.25rem 0.8rem;
+    cursor: pointer;
+    border: 1px solid var(--ion-border-soft);
+    background: linear-gradient(135deg, var(--ion-panel-1), var(--ion-panel-2));
+    color: var(--ion-text-soft);
+    font-size: 0.85rem;
 }
 
-/* 3. Área interna do menu */
-div[data-baseweb="menu"] {
-    background: transparent !important;
-    border-radius: 10px !important;
-    max-height: 300px !important;
-    overflow-y: auto !important;
+/* esconde o circulozinho padrão do radio */
+[data-testid="stRadio"] input[type="radio"] {
+    display: none;
 }
 
-/* 4. Itens da lista */
-ul[role="listbox"] li[role="option"] div div {
-    padding: 0.55rem 0.8rem !important;
-    border-radius: 6px;
-    color: var(--ion-text-primary) !important;
+/* texto dentro do chip */
+[data-testid="stRadio"] label p {
+    margin: 0;
 }
 
-ul[role="listbox"] li[role="option"]:hover div div {
-    background: var(--ion-hover-soft) !important;
+/* estado selecionado */
+[data-testid="stRadio"] label[data-baseweb="radio"] [data-testid="stMarkdownContainer"],
+[data-testid="stRadio"] label[data-baseweb="radio"][aria-checked="true"],
+[data-testid="stRadio"] label[aria-checked="true"] {
+    color: var(--ion-accent);
+    border-color: var(--ion-accent-soft, var(--ion-accent));
+    box-shadow: 0 0 0 1px rgba(177, 211, 53, 0.3);
 }
 
-ul[role="listbox"] li[role="option"][aria-selected="true"] div div {
-    background: var(--ion-hover-strong) !important;
-    color: var(--ion-accent) !important;
+/* hover */
+[data-testid="stRadio"] label:hover {
+    background: var(--ion-hover-soft);
+    color: var(--ion-text-primary);
 }
 
 
