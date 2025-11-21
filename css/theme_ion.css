@@ -386,6 +386,48 @@ div[data-baseweb="menu"] * {
     background-color: transparent !important;
 }
 
+/* ===========================================================
+   CORREÇÃO FINAL PARA SELECTBOX – Streamlit / BaseWeb
+   =========================================================== */
+
+/* 1. Remover regras que quebram posicionamento */
+div[data-baseweb="menu"] * {
+    background-color: transparent !important;
+}
+
+/* 2. Estilo visual correto do popover (sem tocar em layout) */
+div[data-baseweb="popover"]>div {
+    background: linear-gradient(135deg, var(--ion-panel-1), var(--ion-panel-2)) !important;
+    border: 1px solid var(--ion-border-soft) !important;
+    border-radius: 10px !important;
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45) !important;
+}
+
+/* 3. Área interna do menu */
+div[data-baseweb="menu"] {
+    background: transparent !important;
+    border-radius: 10px !important;
+    max-height: 300px !important;
+    overflow-y: auto !important;
+}
+
+/* 4. Itens da lista */
+ul[role="listbox"] li[role="option"] div div {
+    padding: 0.55rem 0.8rem !important;
+    border-radius: 6px;
+    color: var(--ion-text-primary) !important;
+}
+
+ul[role="listbox"] li[role="option"]:hover div div {
+    background: var(--ion-hover-soft) !important;
+}
+
+ul[role="listbox"] li[role="option"][aria-selected="true"] div div {
+    background: var(--ion-hover-strong) !important;
+    color: var(--ion-accent) !important;
+}
+
+
 /* ========================================================================== */
 /* FIM DO TEMA ÍON                                                            */
 /* ========================================================================== */
