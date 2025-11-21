@@ -1,6 +1,7 @@
 # indicadores_macro_br.py
 # -*- coding: utf-8 -*-
 
+import streamlit_shadcn_ui as ui
 import altair as alt
 import requests
 import pandas as pd
@@ -10,6 +11,7 @@ from dateutil.relativedelta import relativedelta
 import streamlit as st
 from typing import Optional, Dict, List, Tuple
 from functools import lru_cache
+from pathlib import Path
 from curvas_anbima import (
     atualizar_todas_as_curvas,
     montar_curva_anbima_hoje,
@@ -19,11 +21,37 @@ from di_futuro_b3 import (
     atualizar_historico_di_futuro,
     carregar_historico_di_futuro,
 )
-import warnings
+from bloco_curto_prazo_br import render_bloco_curto_prazo_br
+import logging
 
-# Remove o aviso do 'use_container_width'
-warnings.filterwarnings("ignore", message=".*use_container_width.*")
 
+# =============================================================================
+# TEMA GLOBAL / CSS EXTERNO (theme_ion.css)
+# =============================================================================
+
+
+def load_theme_css() -> None:
+    """
+    Carrega o arquivo css/theme_ion.css (tema estilo Íon) e injeta no app.
+    Usa session_state para aplicar apenas uma vez por sessão.
+    """
+    # se já carregou uma vez nessa sessão, não faz nada
+    if st.session_state.get("_theme_ion_loaded"):
+        return
+    st.session_state["_theme_ion_loaded"] = True
+
+    css_path = Path(__file__).parent / "css" / "theme_ion.css"
+    try:
+        css = css_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        st.warning(
+            "Arquivo de tema CSS não encontrado em 'css/theme_ion.css'. "
+            "Verifique se ele foi criado corretamente."
+        )
+        return
+
+    # injeta o CSS inteiro dentro de uma tag <style>
+    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
 
 # =============================================================================
@@ -1372,7 +1400,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                 "Var. mensal": f"Erro: {e}",
                 "Acum. no ano": "-",
                 "Acum. 12 meses": "-",
-                "Fonte": "IBGE / PMC (SIDRA – Tabela 8880)",
+                "Fonte": "IBGE / PMC (SIDRA – Tabela 8880)",    
             }
         )
 
@@ -1516,32 +1544,31 @@ def render_bloco1_observatorio_mercado(
 
         # -------- Indicadores BR --------
         with subtab_indic_br:
-            st.markdown("### Indicadores de curto prazo – Brasil")
+            # Bloco de cards / visão rápida (já vem com título próprio)
+            render_bloco_curto_prazo_br()
+
+            # Linha separadora opcional
+            st.markdown("---")
+
+            # Título só para os QUADROS abaixo (tabelas)
+            st.markdown("### Outros indicadores de curto prazo – Brasil")
             st.caption(
-                "Selic Meta, CDI acumulado, câmbio PTAX e DI Futuro (histórico), "
-                "com foco em leitura de curto e médio prazo."
+                "Quadros detalhados com Selic meta, CDI acumulado, câmbio PTAX e "
+                "histórico do DI Futuro, complementando os cards acima."
             )
 
             # Selic
             st.markdown("**Taxa básica – Selic Meta**")
-            st.dataframe(
-                df_selic.set_index("Indicador"),
-                use_container_width=True,
-            )
+            # Usamos st.table para aproveitar diretamente o CSS de tabelas Íon
+            st.table(df_selic.set_index("Indicador"))
 
             # CDI
             st.markdown("**CDI – Retorno acumulado**")
-            st.dataframe(
-                df_cdi.set_index("Indicador"),
-                use_container_width=True,
-            )
+            st.table(df_cdi.set_index("Indicador"))
 
             # Câmbio
             st.markdown("**Câmbio – Dólar PTAX (venda)**")
-            st.dataframe(
-                df_ptax.set_index("Indicador"),
-                use_container_width=True,
-            )
+            st.table(df_ptax.set_index("Indicador"))
 
             # ---------------------------------------------
             # Histórico – DI Futuro (B3) – 1 contrato por ano, próximos 5 anos
@@ -1661,7 +1688,7 @@ def render_bloco1_observatorio_mercado(
                         )
 
                         # --------------------------------------
-                        # Gráfico: contratos âncora (linha + bolinha)
+                        # Gráfico: contratos âncora (linha + bolinha) – estilo Íon
                         # --------------------------------------
                         df_plot = (
                             df_hist[df_hist["ticker"].isin(tickers_ancora)]
@@ -1672,7 +1699,6 @@ def render_bloco1_observatorio_mercado(
                             )
                             .sort_index()
                         )
-
 
                         if df_plot.shape[0] >= 2:
                             df_long = (
@@ -1685,48 +1711,69 @@ def render_bloco1_observatorio_mercado(
                                 .dropna(subset=["Taxa"])
                             )
 
-                            chart_line = (
+                            # Base comum com codificação de eixos e cor
+                            base_chart = (
                                 alt.Chart(df_long)
-                                .mark_line()
                                 .encode(
                                     x=alt.X("data:T", title="Data"),
-                                    y=alt.Y(
-                                        "Taxa:Q",
-                                        title="Taxa (% a.a.)",
-                                    ),
+                                    y=alt.Y("Taxa:Q", title="Taxa (% a.a.)"),
                                     color=alt.Color(
-                                        "Contrato:N", title="Contrato"
+                                        "Contrato:N",
+                                        title="Contrato",
                                     ),
                                 )
                             )
 
-                            chart_points = (
-                                alt.Chart(df_long)
-                                .mark_point(size=40)
-                                .encode(
-                                    x="data:T",
-                                    y="Taxa:Q",
-                                    color="Contrato:N",
-                                    tooltip=[
-                                        "Contrato:N",
-                                        alt.Tooltip("data:T", title="Data"),
-                                        alt.Tooltip(
-                                            "Taxa:Q",
-                                            title="Taxa (% a.a.)",
-                                            format=".4f",
-                                        ),
-                                    ],
+                            # Linha principal
+                            chart_line = base_chart.mark_line(strokeWidth=2)
+
+                            # Pontos nas observações
+                            chart_points = base_chart.mark_point(size=50)
+
+                            chart = (
+                                (chart_line + chart_points)
+                                .properties(
+                                    height=420,
+                                    # fundo geral do chart transparente,
+                                    # quem manda é o fundo do card do Streamlit (tema Íon)
+                                    background="transparent",
+                                )
+                                .configure_axis(
+                                    # cores dos textos dos eixos
+                                    labelColor="#D4DFE6",
+                                    titleColor="#D4DFE6",
+                                    # cores da grade e linha do eixo
+                                    gridColor="#12313F",
+                                    domainColor="#12313F",
+                                )
+                                .configure_view(
+                                    # cor de fundo **dentro** da área do gráfico
+                                    fill="#071B26",
+                                    # tira a borda cinza padrão do Altair
+                                    strokeWidth=0,
+                                )
+                                .configure_legend(
+                                    labelColor="#D4DFE6",
+                                    titleColor="#D4DFE6",
+                                    orient="right",
+                                    padding=8,
+                                    cornerRadius=12,
+                                    # **importante**: não colocar fill/stroke aqui,
+                                    # dá erro no Altair 5 (LegendConfig não tem esses campos)
                                 )
                             )
 
-                            chart = chart_line + chart_points
 
-                            st.altair_chart(chart)
+                            # Faz o gráfico ocupar toda a largura disponível
+                            st.altair_chart(chart, width="stretch")
+
+
                             st.caption(
                                 "Evolução da taxa implícita (% a.a.) dos contratos DI1 "
                                 "mais líquidos (um por ano, próximos 5 anos), "
                                 "com base no histórico salvo em CSV."
                             )
+
                         else:
                             st.info(
                                 "Ainda não há observações suficientes para exibir o gráfico."
@@ -1798,13 +1845,14 @@ def render_bloco1_observatorio_mercado(
                                 pd.DataFrame(linhas_resumo)
                                 .set_index("Contrato")
                             )
-                            st.dataframe(df_resumo, use_container_width=True
-)
+                            # Usa st.table para aplicar o estilo de tabela Íon
+                            st.table(df_resumo)
                         else:
                             st.info(
                                 "Ainda não há histórico suficiente para montar o resumo "
                                 "em janelas semanais para esses contratos."
                             )
+
 
             # -------------------------------
             # Curva de juros – ANBIMA
@@ -1831,13 +1879,14 @@ def render_bloco1_observatorio_mercado(
                     "**Abertura/fechamento por vértice – escolha a curva que você quer enxergar**"
                 )
 
-                # apenas escolhemos o vértice
+                # apenas escolhemos o vértice (slider horizontal, sem dropdown preto)
                 vertice = st.selectbox(
                     "Vértice (anos)",
                     options=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30],
                     index=1,  # 2 anos como padrão
                     format_func=lambda x: f"{x} anos",
                 )
+
 
                 # DataFrame com as variações para o vértice escolhido
                 df_var = montar_curva_anbima_variacoes(anos=vertice)
@@ -1852,61 +1901,59 @@ def render_bloco1_observatorio_mercado(
                     # vamos mostrar as 3 curvas em 3 tabelas lado a lado
                     col_pref, col_ipca, col_breakeven = st.columns(3)
 
-                    def montar_tabela_curva(df_base: pd.DataFrame, nome_coluna: str, titulo: str):
+                    def montar_tabela_curva(
+                        df_base: pd.DataFrame,
+                        nome_coluna: str,
+                        titulo: str,
+                    ) -> pd.DataFrame:
                         """
                         df_base: df_var completo
                         nome_coluna: nome da coluna em df_var ("Juro Nominal (%)", ...)
-                        titulo: texto que vai aparecer no cabeçalho da tabela
+                        titulo: texto que vai aparecer no cabeçalho da tabela.
+
+                        Retorna um DataFrame simples, pronto para ser exibido com st.table,
+                        aproveitando o CSS de tabela do tema Íon.
                         """
                         df_show = (
                             df_base[["Data", nome_coluna]]
                             .rename(columns={nome_coluna: titulo})
                             .set_index("Data")
                         )
+                        # formatação numérica vai ser tratada visualmente pelo front;
+                        # aqui mantemos apenas os valores numéricos.
+                        return df_show
 
-                        # função para deixar a linha "Hoje" em negrito
-                        def destacar_hoje(row):
-                            return [
-                                "font-weight: 600" if row.name == "Hoje" else ""
-                                for _ in row
-                            ]
-
-                        styler = (
-                            df_show.style
-                            .format({titulo: "{:.4f}"})
-                            .apply(destacar_hoje, axis=1)
-                        )
-                        return styler
 
                     # Tabela 1 – Prefixada (juro nominal)
                     with col_pref:
                         st.markdown("**Curva prefixada (juro nominal)**")
-                        styler_pref = montar_tabela_curva(
-                            df_var, "Juro Nominal (%)", "Curva prefixada (juro nominal)"
+                        df_pref = montar_tabela_curva(
+                            df_var,
+                            "Juro Nominal (%)",
+                            "Curva prefixada (juro nominal)",
                         )
-                        st.dataframe(styler_pref, use_container_width=True)
+                        st.table(df_pref)
 
                     # Tabela 2 – IPCA+ (juro real)
                     with col_ipca:
                         st.markdown("**Curva IPCA+ (juro real)**")
-                        styler_ipca = montar_tabela_curva(
-                            df_var, "Juro Real (%)", "Curva IPCA+ (juro real)"
+                        df_ipca = montar_tabela_curva(
+                            df_var,
+                            "Juro Real (%)",
+                            "Curva IPCA+ (juro real)",
                         )
-                        st.dataframe(styler_ipca, use_container_width=True)
+                        st.table(df_ipca)
 
                     # Tabela 3 – Breakeven
                     with col_breakeven:
                         st.markdown("**Breakeven (inflação implícita)**")
-                        styler_be = montar_tabela_curva(
-                            df_var, "Breakeven (%)", "Breakeven (inflação implícita)"
+                        df_be = montar_tabela_curva(
+                            df_var,
+                            "Breakeven (%)",
+                            "Breakeven (inflação implícita)",
                         )
-                        st.dataframe(styler_be, use_container_width=True)
+                        st.table(df_be)
 
-                    st.caption(
-                        "Os níveis estão em % ao ano. A diferença entre as datas indica "
-                        "se a curva abriu ou fechou em cada horizonte (D-1, 1 semana, "
-                        "1 mês, início do ano, 12 meses)."
-                    )
 
                     
         # -------- Expectativas BR --------
@@ -1921,19 +1968,13 @@ def render_bloco1_observatorio_mercado(
             st.caption(
                 "Mediana das projeções de todas as instituições participantes do boletim Focus."
             )
-            st.dataframe(
-                df_focus.set_index("Indicador"),
-                use_container_width=True,
-            )
+            st.table(df_focus.set_index("Indicador"))
 
             st.markdown("**Focus – Top 5 (instituições mais assertivas)**")
             st.caption(
                 "Mediana das projeções das 5 instituições com melhor desempenho histórico no Focus."
             )
-            st.dataframe(
-                df_focus_top5.set_index("Indicador"),
-                use_container_width=True,
-            )
+            st.table(df_focus_top5.set_index("Indicador"))
 
     # ==========================
     # ABA MUNDO
@@ -1990,31 +2031,59 @@ def render_bloco4_mercado_trabalho():
 
 
 def render_bloco5_atividade(df_ativ: pd.DataFrame):
+    # Se vier vazio, mostra aviso amigável
+    if df_ativ is None or df_ativ.empty:
+        st.markdown("### Atividade econômica – IBGE")
+        st.caption(
+            "Indicadores de volume de Varejo (PMC), Serviços (PMS) e Indústria (PIM-PF), "
+            "classificados como indicadores coincidentes do ciclo econômico."
+        )
+        st.info("Ainda não há dados de atividade econômica montados (DataFrame vazio).")
+        return
+
+    # ---------------- TÍTULO + DESCRIÇÃO (fora do card) ----------------
     st.markdown("### Atividade econômica – IBGE")
     st.caption(
         "Indicadores de volume de Varejo (PMC), Serviços (PMS) e Indústria (PIM-PF), "
         "classificados como indicadores coincidentes do ciclo econômico."
     )
 
-    # Filtro de classificação cíclica
-    filtro = st.selectbox(
-        "Classificação cíclica dos indicadores",
-        ["Todos", "Coincidentes"],
-        index=1,
+    # ---------------- CARD ION (igual espírito dos outros blocos) ----------------
+    # Tudo que é “conteúdo” do bloco (título pequeno + filtro + tabela)
+    # fica dentro desse container, que o theme_ion estiliza como card.
+    with st.container(border=True):
+
+        # Linha do subtítulo + filtro (2 colunas, estilo Ion)
+        col_label, col_filtro = st.columns([3, 1])
+
+        with col_label:
+            st.markdown("##### Classificação cíclica dos indicadores")
+
+        with col_filtro:
+            filtro_classif = st.radio(
+                "Classificação",
+                ["Coincidente", "Todos"],
+                index=0,  # Coincidente como padrão
+                key="filtro_atividade_ibge",
+                horizontal=True,  # fica lado a lado, menos poluição visual
+            )
+
+        # --------- LÓGICA DO FILTRO (igual você já tinha) ---------
+        df_exibir = df_ativ.copy()
+
+        if filtro_classif != "Todos":
+            df_exibir = df_exibir[
+                df_exibir["Classificação"]
+                .astype(str)
+                .str.contains(filtro_classif, case=False, na=False)
+            ]
+
+        # --------- TABELA NO PADRÃO ION ---------
+        st.table(
+        df_exibir.set_index(["Indicador", "Classificação"])
     )
 
-    df_exibir = df_ativ.copy()
-
-    if filtro == "Coincidentes":
-        df_exibir = df_exibir[
-            df_exibir["Classificação"].str.contains("Coincidente")
-        ]
-
-    st.dataframe(
-        df_exibir.set_index(["Indicador", "Classificação"]),
-        use_container_width=True,
-    )
-
+    # ---------------- AVISO EMBAIXO (fora do card, igual outros blocos) ----------------
     st.info(
         "⚙️ Em construção (parte avançada): inclusão de indicadores antecedentes "
         "(PMI, confiança FGV) e defasados (desemprego, massa salarial), "
@@ -2023,16 +2092,39 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
 
 
 def render_bloco6_inflacao(df_infla: pd.DataFrame):
+    """Bloco 6 – Inflação (IPCA e IPCA-15) em layout Ion-like."""
+    if df_infla is None or df_infla.empty:
+        st.markdown("### IPCA e IPCA-15 – visão consolidada")
+        st.caption(
+            "Inflação cheia e IPCA-15: mensal, acumulado no ano e em 12 meses."
+        )
+        st.info(
+            "Ainda não há dados de inflação montados (DataFrame vazio). "
+            "Verifique a rotina de carregamento dos dados."
+        )
+        return
+
+    # Deixa o DataFrame com um índice mais bonitinho
+    df_view = df_infla.copy()
+    df_view = df_view.set_index("Indicador")
+
     st.markdown("### IPCA e IPCA-15 – visão consolidada")
-    st.caption("Inflação cheia e IPCA-15: mensal, acumulado no ano e em 12 meses.")
-    st.dataframe(
-        df_infla.set_index("Indicador"),
-        use_container_width=True,
+    st.caption(
+        "Inflação cheia e IPCA-15: mensal, acumulado no ano e em 12 meses."
     )
+
+    col_label, _ = st.columns([3, 1])
+    with col_label:
+        st.markdown("##### Indicadores de inflação – IBGE / SIDRA")
+
+    # AQUI é a mudança: usar st.table para pegar o CSS Íon,
+    # em vez de st.dataframe (que fica preto).
+    st.table(df_view)
 
     st.info(
         "⚙️ Em construção: núcleos, difusão, IGPs, INCC e inflação internacional."
     )
+
 
 
 def render_bloco7_credito_condicoes():
@@ -2129,6 +2221,10 @@ def main():
         page_title="Observatório Macro",
         layout="wide",
     )
+
+    # aplica tema visual global (CSS externo)
+    load_theme_css()
+    
 
     # 🔄 Atualiza ANBIMA + DI Futuro B3 logo que o app inicia
     with st.spinner("Atualizando curvas ANBIMA e histórico de DI Futuro B3..."):
