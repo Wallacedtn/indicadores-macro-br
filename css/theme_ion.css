@@ -1,0 +1,391 @@
+/* ============================================================================
+   TEMA GLOBAL – ESTILO ÍON
+   Observatório Macro BR
+   ========================================================================== */
+
+/* ===========================
+   PALETA PRINCIPAL
+   =========================== */
+
+:root {
+    --ion-bg-1: #061821;
+    --ion-bg-2: #0B2430;
+    --ion-bg-3: #102A3A;
+
+    --ion-panel-1: #071D26;
+    --ion-panel-2: #0F2A36;
+
+    --ion-text-primary: #F9FAFB;
+    --ion-text-muted: #9CA3AF;
+    --ion-text-soft: #6B7280;
+
+    --ion-border-soft: rgba(148, 163, 184, 0.30);
+    --ion-border-strong: rgba(148, 163, 184, 0.60);
+
+    --ion-accent: #C4DD28;
+    --ion-accent-soft: rgba(196, 221, 40, 0.18);
+    --ion-positive: #B4FF70;
+    --ion-negative: #FF6B6B;
+
+    --ion-chip-bg: rgba(15, 42, 54, 0.9);
+    --ion-scrollbar: #334155;
+
+    --ion-hover-soft: rgba(255, 255, 255, 0.05);
+    --ion-hover-strong: rgba(255, 255, 255, 0.12);
+}
+
+/* ===========================
+   BACKGROUND GLOBAL
+   =========================== */
+
+html,
+body {
+    margin: 0;
+    padding: 0;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: var(--ion-text-primary);
+    background: radial-gradient(circle at 0% 0%, #102A3A 0, #061821 45%, #020617 100%);
+}
+
+/* fundo principal do app */
+[data-testid="stAppViewContainer"] {
+    background: radial-gradient(circle at 0% 0%, #102A3A 0, #061821 45%, #020617 100%);
+}
+
+/* cabeçalho transparente */
+[data-testid="stHeader"] {
+    background: transparent !important;
+}
+
+/* ===========================
+   LARGURA GLOBAL
+   =========================== */
+
+.block-container {
+    padding-top: 1.2rem;
+
+    width: 100% !important;
+    max-width: 1500px !important;
+
+    margin-left: auto !important;
+    margin-right: auto !important;
+
+    padding-left: 2rem !important;
+    padding-right: 2rem !important;
+    box-sizing: border-box;
+}
+
+/* wrapper das abas (para alinhar com o container) */
+main>div {
+    margin-left: auto !important;
+    margin-right: auto !important;
+    max-width: 1500px !important;
+    padding-left: 2rem !important;
+    padding-right: 2rem !important;
+    box-sizing: border-box;
+}
+
+/* ===========================
+   TIPOGRAFIA
+   =========================== */
+
+h1 {
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--ion-text-primary);
+    margin-bottom: 0.1rem;
+}
+
+h2 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--ion-text-primary);
+}
+
+h3 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--ion-text-primary);
+}
+
+p,
+span,
+label {
+    color: var(--ion-text-muted);
+}
+
+/* subtítulo “Observatório Macro” */
+.ion-subtitle {
+    font-size: 0.85rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ion-text-soft);
+}
+
+/* separadores */
+hr {
+    border: none;
+    border-top: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+/* ===========================
+   CARDS / MÉTRICAS
+   =========================== */
+
+.ion-card,
+[data-testid="stMetric"] {
+    background: linear-gradient(135deg, var(--ion-panel-1), var(--ion-panel-2));
+    border-radius: 16px;
+    border: 1px solid var(--ion-border-soft);
+    padding: 18px 20px;
+    box-shadow: 0 18px 35px rgba(0, 0, 0, 0.45);
+    position: relative;
+}
+
+.ion-badge {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.5);
+    font-size: 0.65rem;
+    color: var(--ion-text-soft);
+    background: rgba(15, 23, 42, 0.7);
+}
+
+[data-testid="stMetricValue"] {
+    font-size: 1.7rem;
+    font-weight: 600;
+}
+
+/* ===========================
+   TABS
+   =========================== */
+
+.stTabs {
+    padding-top: 0.8rem;
+}
+
+/* barra das abas */
+.stTabs [data-baseweb="tab-list"] {
+    width: 100%;
+    max-width: 1500px !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+    display: flex;
+    gap: 0.5rem;
+    box-sizing: border-box;
+}
+
+/* aba */
+.stTabs [data-baseweb="tab"] {
+    padding: 0.38rem 0.9rem;
+    border-radius: 999px;
+    background-color: rgba(15, 23, 42, 0.6);
+    color: var(--ion-text-soft);
+    font-size: 0.82rem;
+    border: 1px solid transparent;
+}
+
+/* aba ativa */
+.stTabs [aria-selected="true"] {
+    background: linear-gradient(135deg, #102A3A, #12323F);
+    color: var(--ion-text-primary) !important;
+    border-color: var(--ion-accent-soft);
+}
+
+/* ===========================
+   EXPANDERS
+   =========================== */
+
+[data-testid="stExpander"] {
+    border-radius: 14px;
+    border: 1px solid var(--ion-border-soft);
+    background: linear-gradient(135deg, #071D26, #0C2230);
+}
+
+/* ===========================
+   TABELAS
+   =========================== */
+
+/* container base */
+[data-testid="stTable"],
+[data-testid="stStyledTable"],
+.stDataFrame {
+    background: linear-gradient(135deg, var(--ion-panel-1), var(--ion-panel-2)) !important;
+    border-radius: 14px !important;
+    border: 1px solid var(--ion-border-soft) !important;
+}
+
+/* tabela padrão */
+table {
+    background: transparent !important;
+    color: var(--ion-text-primary) !important;
+    font-size: 0.85rem !important;
+    width: 100% !important;
+    border-collapse: collapse !important;
+}
+
+thead tr {
+    background-color: rgba(15, 23, 42, 0.95) !important;
+}
+
+thead th {
+    color: var(--ion-text-soft) !important;
+    padding: 0.55rem 0.6rem !important;
+    border-bottom: 1px solid var(--ion-border-soft) !important;
+}
+
+tbody td {
+    padding: 0.55rem 0.6rem !important;
+    color: var(--ion-text-primary) !important;
+}
+
+/* hover da linha */
+tbody tr:hover {
+    background: rgba(255, 255, 255, 0.03) !important;
+}
+
+/* scrollbars globais */
+::-webkit-scrollbar {
+    height: 8px;
+    width: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--ion-scrollbar);
+    border-radius: 4px;
+}
+
+/* ===========================
+   SELECTBOX / DROPDOWNS
+   =========================== */
+
+/* wrapper do selectbox */
+[data-testid="stSelectbox"] {
+    color: var(--ion-text-primary) !important;
+}
+
+/* rótulo */
+[data-testid="stSelectbox"] label {
+    color: var(--ion-text-muted) !important;
+    font-size: 0.9rem !important;
+}
+
+/* caixa principal */
+[data-testid="stSelectbox"] div[data-baseweb="select"] {
+    background: linear-gradient(135deg, var(--ion-panel-1), var(--ion-panel-2)) !important;
+    border-radius: 999px !important;
+    border: 1px solid var(--ion-border-soft) !important;
+    color: var(--ion-text-primary) !important;
+    min-height: 2.4rem !important;
+    padding: 0 0.4rem;
+    box-shadow: none !important;
+}
+
+/* remove fundos internos */
+[data-baseweb="select"]>div,
+[data-baseweb="select"]>div>div {
+    background: transparent !important;
+    color: var(--ion-text-primary) !important;
+}
+
+/* texto */
+[data-baseweb="select"] div[role="combobox"] {
+    color: var(--ion-text-primary) !important;
+}
+
+/* setinha */
+[data-baseweb="select"] svg {
+    color: var(--ion-text-soft) !important;
+}
+
+/* ===========================
+   DROPDOWN POPUP
+   =========================== */
+
+/* deixa o posicionamento padrão do BaseWeb; só limpamos o fundo */
+div[data-baseweb="popover"] {
+    background: transparent !important;
+}
+
+/* card do dropdown */
+div[data-baseweb="popover"]>div {
+    width: auto !important;
+    max-width: none !important;
+    background: linear-gradient(135deg, var(--ion-panel-1), var(--ion-panel-2)) !important;
+    border: 1px solid var(--ion-border-soft) !important;
+    border-radius: 10px !important;
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45) !important;
+}
+
+/* área de menu */
+div[data-baseweb="menu"] {
+    background: transparent !important;
+    border-radius: 10px !important;
+    max-height: 320px !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+}
+
+/* ===========================
+   LISTA DE OPÇÕES
+   =========================== */
+
+ul[role="listbox"] {
+    background: transparent !important;
+    padding: 0.25rem 0 !important;
+    margin: 0;
+    border-radius: 8px;
+}
+
+ul[role="listbox"] li[role="option"] {
+    background: transparent !important;
+    color: var(--ion-text-primary) !important;
+}
+
+ul[role="listbox"] li[role="option"] div,
+ul[role="listbox"] li[role="option"] div div {
+    background: transparent !important;
+    color: var(--ion-text-primary) !important;
+}
+
+ul[role="listbox"] li[role="option"] div div {
+    padding: 0.55rem 0.8rem !important;
+    border-radius: 6px;
+}
+
+ul[role="listbox"] li[role="option"]:hover div div {
+    background: var(--ion-hover-soft) !important;
+}
+
+ul[role="listbox"] li[role="option"][aria-selected="true"] div div {
+    background: var(--ion-hover-strong) !important;
+    color: var(--ion-accent) !important;
+}
+
+ul[role="listbox"] li[role="option"],
+ul[role="listbox"] li[role="option"] * {
+    box-shadow: none !important;
+}
+
+/* ===========================
+   HOTFIX
+   =========================== */
+
+/* só removemos fundo sólido, sem mexer em position */
+div[data-baseweb="popover"],
+div[data-baseweb="popover"] * {
+    background-color: transparent !important;
+}
+
+div[data-baseweb="menu"] * {
+    background-color: transparent !important;
+}
+
+/* ========================================================================== */
+/* FIM DO TEMA ÍON                                                            */
+/* ========================================================================== */
