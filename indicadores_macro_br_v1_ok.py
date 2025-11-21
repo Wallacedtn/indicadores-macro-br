@@ -1858,101 +1858,87 @@ def render_bloco1_observatorio_mercado(
             # Curva de juros – ANBIMA
             # -------------------------------
 
-            st.markdown("### Curva de juros – ANBIMA (Prefixado x IPCA+)")
-            st.caption(
-                "Juro nominal, juro real e breakeven para vértices selecionados "
-                "com base nas curvas da ANBIMA (DI, prefixada e IPCA+), usando "
-                "histórico salvo localmente em CSV."
+            # lista fixa de vértices
+            vertices_anos = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30]
+
+            # default: 2 anos
+            if "vertice_anbima" not in st.session_state:
+                st.session_state["vertice_anbima"] = 2
+
+            vertice = st.radio(
+                "Vértice (anos)",
+                options=vertices_anos,
+                format_func=lambda x: f"{x} anos",
+                horizontal=True,
+                key="vertice_anbima",
             )
 
-            df_curva_hoje = montar_curva_anbima_hoje()
+            # DataFrame com as variações para o vértice escolhido
+            df_var = montar_curva_anbima_variacoes(anos=vertice)
 
-            if df_curva_hoje.empty:
+
+            if df_var.empty:
                 st.info(
-                    "Ainda não há dados locais das curvas ANBIMA para hoje. "
-                    "Certifique-se de rodar o app em dia útil, após a "
-                    "divulgação das curvas pela ANBIMA, para começar a "
-                    "popular o histórico (arquivos em data/curvas_anbima)."
+                    "Ainda não há histórico suficiente para esse vértice. "
+                    "Conforme o tempo passar, o painel vai acumulando "
+                    "observações diárias das curvas ANBIMA."
                 )
             else:
-                st.markdown(
-                    "**Abertura/fechamento por vértice – escolha a curva que você quer enxergar**"
-                )
+                # vamos mostrar as 3 curvas em 3 tabelas lado a lado
+                col_pref, col_ipca, col_breakeven = st.columns(3)
 
-                # apenas escolhemos o vértice (slider horizontal, sem dropdown preto)
-                vertice = st.selectbox(
-                    "Vértice (anos)",
-                    options=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30],
-                    index=1,  # 2 anos como padrão
-                    format_func=lambda x: f"{x} anos",
-                )
+                def montar_tabela_curva(
+                    df_base: pd.DataFrame,
+                    nome_coluna: str,
+                    titulo: str,
+                ) -> pd.DataFrame:
+                    """
+                    df_base: df_var completo
+                    nome_coluna: nome da coluna em df_var ("Juro Nominal (%)", ...)
+                    titulo: texto que vai aparecer no cabeçalho da tabela.
 
-
-                # DataFrame com as variações para o vértice escolhido
-                df_var = montar_curva_anbima_variacoes(anos=vertice)
-
-                if df_var.empty:
-                    st.info(
-                        "Ainda não há histórico suficiente para esse vértice. "
-                        "Conforme o tempo passar, o painel vai acumulando "
-                        "observações diárias das curvas ANBIMA."
+                    Retorna um DataFrame simples, pronto para ser exibido com st.table,
+                    aproveitando o CSS de tabela do tema Íon.
+                    """
+                    df_show = (
+                        df_base[["Data", nome_coluna]]
+                        .rename(columns={nome_coluna: titulo})
+                        .set_index("Data")
                     )
-                else:
-                    # vamos mostrar as 3 curvas em 3 tabelas lado a lado
-                    col_pref, col_ipca, col_breakeven = st.columns(3)
-
-                    def montar_tabela_curva(
-                        df_base: pd.DataFrame,
-                        nome_coluna: str,
-                        titulo: str,
-                    ) -> pd.DataFrame:
-                        """
-                        df_base: df_var completo
-                        nome_coluna: nome da coluna em df_var ("Juro Nominal (%)", ...)
-                        titulo: texto que vai aparecer no cabeçalho da tabela.
-
-                        Retorna um DataFrame simples, pronto para ser exibido com st.table,
-                        aproveitando o CSS de tabela do tema Íon.
-                        """
-                        df_show = (
-                            df_base[["Data", nome_coluna]]
-                            .rename(columns={nome_coluna: titulo})
-                            .set_index("Data")
-                        )
-                        # formatação numérica vai ser tratada visualmente pelo front;
-                        # aqui mantemos apenas os valores numéricos.
-                        return df_show
+                    # formatação numérica vai ser tratada visualmente pelo front;
+                    # aqui mantemos apenas os valores numéricos.
+                    return df_show
 
 
-                    # Tabela 1 – Prefixada (juro nominal)
-                    with col_pref:
-                        st.markdown("**Curva prefixada (juro nominal)**")
-                        df_pref = montar_tabela_curva(
-                            df_var,
-                            "Juro Nominal (%)",
-                            "Curva prefixada (juro nominal)",
-                        )
-                        st.table(df_pref)
+                # Tabela 1 – Prefixada (juro nominal)
+                with col_pref:
+                    st.markdown("**Curva prefixada (juro nominal)**")
+                    df_pref = montar_tabela_curva(
+                        df_var,
+                        "Juro Nominal (%)",
+                        "Curva prefixada (juro nominal)",
+                    )
+                    st.table(df_pref)
 
-                    # Tabela 2 – IPCA+ (juro real)
-                    with col_ipca:
-                        st.markdown("**Curva IPCA+ (juro real)**")
-                        df_ipca = montar_tabela_curva(
-                            df_var,
-                            "Juro Real (%)",
-                            "Curva IPCA+ (juro real)",
-                        )
-                        st.table(df_ipca)
+                # Tabela 2 – IPCA+ (juro real)
+                with col_ipca:
+                    st.markdown("**Curva IPCA+ (juro real)**")
+                    df_ipca = montar_tabela_curva(
+                        df_var,
+                        "Juro Real (%)",
+                        "Curva IPCA+ (juro real)",
+                    )
+                    st.table(df_ipca)
 
-                    # Tabela 3 – Breakeven
-                    with col_breakeven:
-                        st.markdown("**Breakeven (inflação implícita)**")
-                        df_be = montar_tabela_curva(
-                            df_var,
-                            "Breakeven (%)",
-                            "Breakeven (inflação implícita)",
-                        )
-                        st.table(df_be)
+                # Tabela 3 – Breakeven
+                with col_breakeven:
+                    st.markdown("**Breakeven (inflação implícita)**")
+                    df_be = montar_tabela_curva(
+                        df_var,
+                        "Breakeven (%)",
+                        "Breakeven (inflação implícita)",
+                    )
+                    st.table(df_be)
 
 
                     
