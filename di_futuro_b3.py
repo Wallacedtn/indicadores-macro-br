@@ -34,11 +34,25 @@ HEADERS = {
 # HELPER PARA BUSCAR JSON
 # ============================================================
 
+from requests.exceptions import RequestException  # deixe perto dos outros imports
+
+
 def _get_json(url: str, timeout: int = 30) -> dict:
-    """Faz GET na API da B3 e devolve o JSON já convertido."""
-    resp = requests.get(url, headers=HEADERS, timeout=timeout)
-    resp.raise_for_status()
-    return resp.json()
+    """
+    Faz GET na API da B3 e devolve o JSON já convertido.
+
+    Se der erro de rede/HTTP (521, 5xx, timeout etc.), devolve
+    um dict vazio e deixa o chamador seguir a vida usando
+    histórico antigo em vez de quebrar o app.
+    """
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
+    except RequestException as e:
+        # Log só no console / log do servidor, não aparece para o usuário final.
+        print(f"[di_futuro_b3] Erro ao acessar API B3 ({url}): {e}")
+        return {}
 
 
 # ============================================================

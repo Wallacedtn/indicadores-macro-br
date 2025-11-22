@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
-
 from typing import Optional
-
 import streamlit as st
+from dados_curto_prazo_br import (
+    carregar_dados_curto_prazo_br,
+    montar_resumo_ibovespa_tabela,
+)
 
-from dados_curto_prazo_br import carregar_dados_curto_prazo_br
 
 # =============================================================================
 # PALETA (inspirada em tons escuros + verde limão)
@@ -152,17 +153,17 @@ def _inject_ion_css_curto_prazo() -> None:
     font-weight: 600;
 }}
 
-.ion-delta-up {{
+.ion-delta-pos {{
     background: rgba(60, 179, 113, 0.15);
     color: #7BE27B;
 }}
 
-.ion-delta-down {{
+.ion-delta-neg {{
     background: rgba(255, 99, 132, 0.10);
     color: #FF7B9C;
 }}
 
-.ion-delta-flat {{
+.ion-delta-neu {{
     background: rgba(148, 163, 184, 0.08);
     color: {ION_TEXT_MUTED};
 }}
@@ -280,8 +281,19 @@ def render_bloco_curto_prazo_br() -> None:
     _inject_ion_css_curto_prazo()
 
     dados = carregar_dados_curto_prazo_br()
+
+    # Se, por algum motivo, o carregamento falhar e voltar None,
+    # não deixa o app quebrar.
+    if dados is None:
+        st.error(
+            "Erro ao carregar os dados de curto prazo "
+            "(carregar_dados_curto_prazo_br retornou None)."
+        )
+        return
+
     moeda = dados.moeda_juros
     ativos = dados.ativos_domesticos
+    
 
     # -------------------- TÍTULO COM ÍCONE GENÉRICO --------------------
     header_html = f"""<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
@@ -372,40 +384,79 @@ background:rgba(10,26,29,0.95);">
             fmt_value="{:,.2f}",
             value_is_pct=False,
             delta_is_pct=True,
-            badge="intraday",
+            badge="vs D-1",  # antes: "intraday"
             icon_html=ICON_CHART,
         )
 
-    # DI Futuro ~2 anos – Δ p.p. intraday
+
+    # DI Futuro ~2 anos – Δ p.p.
     with col5:
         di2_taxa = getattr(ativos, "di_2_anos_taxa", None)
         di2_delta = getattr(ativos, "di_2_anos_delta", None)
+        di2_fonte = getattr(ativos, "di_2_anos_fonte_delta", None)
+        di2_ticker = getattr(ativos, "di_2_anos_ticker", None)
+
+        # título: se tiver ticker, usa ele; senão, mantém o texto antigo
+        if di2_ticker:
+            titulo_di2 = f"{di2_ticker} (B3)"
+        else:
+            titulo_di2 = "DI Futuro ~2 anos (B3)"
+
+        if di2_delta is None:
+            badge_di2 = None
+        else:
+            if di2_fonte == "intraday":
+                badge_di2 = "intraday"
+            elif di2_fonte == "D-1":
+                badge_di2 = "vs D-1"
+            else:
+                badge_di2 = None
+
         metric_card(
-            "DI Futuro ~2 anos (B3)",
+            titulo_di2,
             di2_taxa,
             di2_delta,
             fmt_value="{:.2f}",
             value_is_pct=False,
             delta_is_pp=True,
-            badge="intraday",
+            badge=badge_di2,
             icon_html=ICON_CHART,
         )
 
-    # DI Futuro ~5 anos – Δ p.p. intraday
+
+    # DI Futuro ~5 anos – Δ p.p.
     with col6:
         di5_taxa = getattr(ativos, "di_5_anos_taxa", None)
         di5_delta = getattr(ativos, "di_5_anos_delta", None)
+        di5_fonte = getattr(ativos, "di_5_anos_fonte_delta", None)
+        di5_ticker = getattr(ativos, "di_5_anos_ticker", None)
+
+        if di5_ticker:
+            titulo_di5 = f"{di5_ticker} (B3)"
+        else:
+            titulo_di5 = "DI Futuro ~5 anos (B3)"
+
+        if di5_delta is None:
+            badge_di5 = None
+        else:
+            if di5_fonte == "intraday":
+                badge_di5 = "intraday"
+            elif di5_fonte == "D-1":
+                badge_di5 = "vs D-1"
+            else:
+                badge_di5 = None
+
         metric_card(
-            "DI Futuro ~5 anos (B3)",
+            titulo_di5,
             di5_taxa,
             di5_delta,
             fmt_value="{:.2f}",
             value_is_pct=False,
             delta_is_pp=True,
-            badge="intraday",
+            badge=badge_di5,
             icon_html=ICON_CHART,
         )
-
+        
 
 def render_bloco_curto_prazo() -> None:
     """Alias para compatibilidade com chamadas antigas."""

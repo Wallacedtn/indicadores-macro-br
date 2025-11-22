@@ -4,15 +4,27 @@
 import pandas as pd
 import requests
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
 from functools import lru_cache
 from dateutil.relativedelta import relativedelta
+from di_futuro_b3 import (
+    baixar_snapshot_di_futuro,   # snapshot do dia
+    carregar_historico_di_futuro # di1_historico.csv
+)  # DI Futuro B
 
 # Caminho para o CSV de curvas ANBIMA (já usado no bloco de Curvas)
 BASE_DIR = Path(__file__).parent
 CAMINHO_CURVAS_ANBIMA = BASE_DIR / "data" / "curvas_anbima_full.csv"
+
+# Caminho para o histórico local do Ibovespa (últimos fechamentos)
+CAMINHO_IBOV_HIST = BASE_DIR / "data" / "ibov_historico.csv"
+
+# Ipeadata – série diária do Ibovespa (fechamento)
+IPEA_BASE_URL = "https://www.ipeadata.gov.br/api/odata4"
+IBOV_SERCODIGO = "GM366_IBVSP366"  # troque aqui pelo SERCODIGO real do Ipeadata
+
 
 # =============================================================================
 # DATACLASSES – ESTRUTURA DE DADOS DO BLOCO CURTO PRAZO
@@ -65,6 +77,14 @@ class AtivosDomesticosCurtoPrazo:
     di_2_anos_delta: Optional[float] = None  # var. em p.p. no dia
     di_5_anos_taxa: Optional[float] = None
     di_5_anos_delta: Optional[float] = None  # var. em p.p. no dia
+
+    # NOVO: tickers que estão sendo usados em cada card
+    di_2_anos_ticker: Optional[str] = None
+    di_5_anos_ticker: Optional[str] = None
+
+    # fonte da variação (intraday = API B3 / D-1 = histórico csv)
+    di_2_anos_fonte_delta: Optional[str] = None
+    di_5_anos_fonte_delta: Optional[str] = None
 
 
 @dataclass
@@ -176,7 +196,6 @@ def buscar_ptax_venda() -> pd.DataFrame:
 
 def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
     """
-    Mesma lógica conceitual da função que você já usa em indicadores_macro_br.py:
     - último nível
     - variação no ano
     - nível e variação em 12m / 24m
@@ -243,7 +262,7 @@ def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 
 
 # =============================================================================
-# CURVA ANBIMA – CONTINUA IGUAL (PRÉ 2 ANOS / 5 ANOS)
+# CURVA ANBIMA – PRÉ 2 ANOS / 5 ANOS
 # =============================================================================
 
 
@@ -291,6 +310,431 @@ def _obter_taxas_pref_2e5_anos() -> Tuple[Optional[date], Optional[float], Optio
 
 
 # =============================================================================
+# HELPERS – IBOVESPA E DI FUTURO
+# =============================================================================
+
+
+def _carregar_ibovespa_curto() -> Tuple[float, float, float, float]:
+    """
+    Carrega o Ibovespa (fechamento diário) diretamente do Ipeadata
+    e calcula:
+
+      - nível atual (último fechamento)
+      - variação no dia (%)
+      - variação no mês (%)
+      - variação no ano (%)
+
+    Se a chamada ao Ipeadata falhar (timeout, etc.),
+    devolve valores neutros para não derrubar o app.
+    """
+    try:
+        # Monta URL da série no Ipeadata
+        url = f"{IPEA_BASE_URL}/ValoresSerie(SERCODIGO='{IBOV_SERCODIGO}')"
+
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+        valores = payload.get("value", [])
+
+        if not valores:
+            raise RuntimeError("Ipeadata retornou lista vazia para o Ibovespa.")
+
+        # Monta lista (data, fechamento)
+        registros = []
+        for item in valores:
+            data_str = item.get("VALDATA")
+            valor = item.get("VALVALOR")
+            if not data_str or valor is None:
+                continue
+            # VALDATA costuma vir como "yyyy-MM-ddT00:00:00" – pegamos só a parte da data
+            registros.append((data_str[:10], float(valor)))
+
+        if not registros:
+            raise RuntimeError("Não consegui extrair registros válidos de Ibovespa do Ipeadata.")
+
+        df = pd.DataFrame(registros, columns=["data", "fechamento"])
+        df["data"] = pd.to_datetime(df["data"])
+        df = df.sort_values("data").set_index("data")
+
+        close = df["fechamento"]
+
+        # Nível atual = último fechamento
+        ultimo_close = float(close.iloc[-1])
+
+        # Variação no dia (%): último vs penúltimo
+        if len(close) >= 2:
+            close_ontem = float(close.iloc[-2])
+            var_dia = (ultimo_close / close_ontem - 1.0) * 100.0
+        else:
+            var_dia = 0.0
+
+        # Data do último fechamento
+        idx_ult = close.index[-1]
+        ano_ult = idx_ult.year
+        mes_ult = idx_ult.month
+
+        # Variação no mês (%): último vs primeiro do mês
+        mask_mes = (close.index.year == ano_ult) & (close.index.month == mes_ult)
+        df_mes = close[mask_mes]
+        if not df_mes.empty:
+            close_ini_mes = float(df_mes.iloc[0])
+            var_mes = (ultimo_close / close_ini_mes - 1.0) * 100.0
+        else:
+            var_mes = 0.0
+
+        # Variação no ano (%): último vs primeiro do ano
+        mask_ano = close.index.year == ano_ult
+        df_ano = close[mask_ano]
+        if not df_ano.empty:
+            close_ini_ano = float(df_ano.iloc[0])
+            var_ano = (ultimo_close / close_ini_ano - 1.0) * 100.0
+        else:
+            var_ano = 0.0
+
+        return ultimo_close, var_dia, var_mes, var_ano
+
+    except Exception:
+        # Fallback se o Ipeadata cair / der timeout:
+        # mantém o app de pé com um valor "placeholder".
+        return 128_500.0, 0.0, 0.0, 0.0
+
+def montar_resumo_ibovespa_tabela() -> pd.DataFrame:
+    """
+    Monta um pequeno resumo de desempenho do Ibovespa
+    para ser exibido em tabela no bloco de curto prazo.
+
+    Retorna um DataFrame com colunas:
+      - "Período"
+      - "Nível base (pts)"
+      - "Nível atual (pts)"
+      - "Variação (%)"
+    """
+    try:
+        # Mesma lógica de chamada ao Ipeadata
+        url = f"{IPEA_BASE_URL}/ValoresSerie(SERCODIGO='{IBOV_SERCODIGO}')"
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+        valores = payload.get("value", [])
+
+        if not valores:
+            raise RuntimeError("Ipeadata retornou lista vazia para o Ibovespa.")
+
+        # Monta série (data, fechamento)
+        registros = []
+        for item in valores:
+            data_str = item.get("VALDATA")
+            valor = item.get("VALVALOR")
+            if not data_str or valor is None:
+                continue
+            registros.append((data_str[:10], float(valor)))
+
+        if not registros:
+            raise RuntimeError(
+                "Não consegui extrair registros válidos de Ibovespa do Ipeadata."
+            )
+
+        df = pd.DataFrame(registros, columns=["data", "fechamento"])
+        df["data"] = pd.to_datetime(df["data"])
+        df = df.sort_values("data").set_index("data")
+
+        close = df["fechamento"]
+
+        # Último fechamento
+        ultimo_close = float(close.iloc[-1])
+        data_ult = close.index[-1]
+
+        # ---------- No ano ----------
+        mask_ano = close.index.year == data_ult.year
+        serie_ano = close[mask_ano]
+        if not serie_ano.empty:
+            base_ano = float(serie_ano.iloc[0])
+        else:
+            base_ano = ultimo_close
+        var_ano = (ultimo_close / base_ano - 1.0) * 100.0 if base_ano != 0 else 0.0
+
+        # ---------- Em 12 meses ----------
+        data_12m = data_ult - relativedelta(years=1)
+        serie_12m = close[close.index <= data_12m]
+        if not serie_12m.empty:
+            base_12m = float(serie_12m.iloc[-1])
+        else:
+            base_12m = ultimo_close
+        var_12m = (ultimo_close / base_12m - 1.0) * 100.0 if base_12m != 0 else 0.0
+
+        # ---------- Em 24 meses ----------
+        data_24m = data_ult - relativedelta(years=2)
+        serie_24m = close[close.index <= data_24m]
+        if not serie_24m.empty:
+            base_24m = float(serie_24m.iloc[-1])
+        else:
+            base_24m = ultimo_close
+        var_24m = (ultimo_close / base_24m - 1.0) * 100.0 if base_24m != 0 else 0.0
+
+        dados_tabela = [
+            {
+                "Período": "No ano",
+                "Nível base (pts)": base_ano,
+                "Nível atual (pts)": ultimo_close,
+                "Variação (%)": var_ano,
+            },
+            {
+                "Período": "Em 12 meses",
+                "Nível base (pts)": base_12m,
+                "Nível atual (pts)": ultimo_close,
+                "Variação (%)": var_12m,
+            },
+            {
+                "Período": "Em 24 meses",
+                "Nível base (pts)": base_24m,
+                "Nível atual (pts)": ultimo_close,
+                "Variação (%)": var_24m,
+            },
+        ]
+
+        return pd.DataFrame(dados_tabela)
+
+    except Exception:
+        # Em caso de erro, devolve DF vazio para não derrubar o app
+        return pd.DataFrame(
+            columns=[
+                "Período",
+                "Nível base (pts)",
+                "Nível atual (pts)",
+                "Variação (%)",
+            ]
+        )
+
+
+def _escolher_di_por_prazo(
+    df: pd.DataFrame,
+    anos_alvo: float,
+    tolerancia: float = 0.75,
+) -> Tuple[Optional[str], Optional[float], Optional[float]]:
+    """
+    Escolhe o contrato DI1 cujo vencimento está mais perto de `anos_alvo`.
+
+    - anos_alvo em anos (ex.: 2.0, 5.0)
+    - devolve (ticker, taxa, delta_em_pontos_percentuais)
+    """
+    if df is None or df.empty:
+        return None, None, None
+
+    if "vencimento" not in df.columns or "taxa" not in df.columns:
+        return None, None, None
+
+    hoje = date.today()
+
+    df = df.copy()
+
+    # converte vencimento para datetime, mas derruba datas absurdas (ex.: 9999-12-31)
+    venc_dt = pd.to_datetime(df["vencimento"], errors="coerce")
+
+    # mantém só anos "plausíveis" para DI (ex.: entre 2000 e 2100)
+    mask_anos_ok = (venc_dt.dt.year >= 2000) & (venc_dt.dt.year <= 2100)
+    venc_dt = venc_dt.where(mask_anos_ok)
+
+    df["vencimento"] = venc_dt.dt.date
+    df = df.dropna(subset=["vencimento"])
+
+    df["dias_ate_venc"] = df["vencimento"].apply(
+        lambda d: (d - hoje).days if isinstance(d, date) else None
+    )
+    df = df.dropna(subset=["dias_ate_venc"])
+
+    # converte para anos usando ~252 dias úteis
+    df["anos_ate_venc"] = df["dias_ate_venc"].astype(float) / 252.0
+    df["diff_anos"] = (df["anos_ate_venc"] - float(anos_alvo)).abs()
+
+    # restringe à janela em torno do alvo; se não tiver, usa todos
+    df_janela = df[df["diff_anos"] <= tolerancia]
+    if df_janela.empty:
+        df_janela = df
+
+    # ordena pela proximidade do alvo e, se existir, por volume desc
+    sort_cols = ["diff_anos"]
+    ascending = [True]
+    if "volume" in df_janela.columns:
+        sort_cols.append("volume")
+        ascending.append(False)
+
+    df_janela = df_janela.sort_values(sort_cols, ascending=ascending)
+
+    linha = df_janela.iloc[0]
+
+    taxa_raw = linha.get("taxa")
+    variacao_bps_raw = linha.get("variacao_bps")
+    ticker = linha.get("ticker")
+
+    taxa = float(taxa_raw) if pd.notnull(taxa_raw) else None
+
+    if variacao_bps_raw is None or pd.isna(variacao_bps_raw):
+        delta_pp = None
+    else:
+        try:
+            delta_pp = float(variacao_bps_raw) / 100.0
+        except Exception:
+            delta_pp = None
+
+    return ticker, taxa, delta_pp
+
+
+def _delta_di_vs_d1(
+    df_hist: pd.DataFrame,
+    ticker: Optional[str],
+    taxa_atual: Optional[float],
+) -> Optional[float]:
+    """
+    Calcula o delta em p.p. vs D-1 a partir do histórico di1_historico.csv
+    para um determinado ticker.
+    """
+    if df_hist is None or df_hist.empty or ticker is None or taxa_atual is None:
+        return None
+
+    df_tk = df_hist[df_hist["ticker"] == ticker].copy()
+    if df_tk.empty:
+        return None
+
+    df_tk = df_tk.sort_values("data")
+
+    if len(df_tk) < 2:
+        return None
+
+    taxa_d1_raw = df_tk["taxa"].iloc[-2]
+    try:
+        taxa_d1 = float(taxa_d1_raw)
+    except Exception:
+        return None
+
+    # delta em p.p. (taxa atual - taxa do dia anterior)
+    return taxa_atual - taxa_d1
+
+
+def _carregar_di_futuro_2e5_anos() -> Tuple[
+    Optional[str],
+    Optional[float],
+    Optional[float],
+    str,
+    Optional[str],
+    Optional[float],
+    Optional[float],
+    str,
+]:
+    """
+    Usa o snapshot DI Futuro B3 + histórico (csv) para aproximar
+    as taxas de 2 anos e 5 anos e a variação:
+
+      - Se a API da B3 trouxer `variacao_bps`, usamos como delta intraday.
+      - Caso contrário, tentamos calcular delta vs D-1 a partir do histórico.
+      - Se o snapshot do dia falhar, usamos o ÚLTIMO DIA disponível no histórico
+        para nível e delta (fonte = 'D-1').
+
+    Retorna:
+      (ticker_2a, di_2a_taxa, di_2a_delta, fonte_2,
+       ticker_5a, di_5a_taxa, di_5a_delta, fonte_5)
+    """
+    di_2_taxa: Optional[float] = None
+    di_2_delta: Optional[float] = None
+    di_5_taxa: Optional[float] = None
+    di_5_delta: Optional[float] = None
+    fonte_di2 = "none"
+    fonte_di5 = "none"
+    ticker_di2: Optional[str] = None
+    ticker_di5: Optional[str] = None
+
+    # 1) Snapshot do dia (tenta intraday)
+    try:
+        df = baixar_snapshot_di_futuro()
+    except Exception:
+        df = None
+
+    if df is not None and not df.empty:
+        ticker_di2, di_2_taxa, di_2_delta_intr = _escolher_di_por_prazo(
+            df, anos_alvo=2.0
+        )
+        ticker_di5, di_5_taxa, di_5_delta_intr = _escolher_di_por_prazo(
+            df, anos_alvo=5.0
+        )
+
+        if di_2_taxa is not None and di_2_delta_intr is not None:
+            di_2_delta = di_2_delta_intr
+            fonte_di2 = "intraday"
+
+        if di_5_taxa is not None and di_5_delta_intr is not None:
+            di_5_delta = di_5_delta_intr
+            fonte_di5 = "intraday"
+
+    # 2) Histórico (csv) – para delta D-1 e fallback de nível
+    try:
+        df_hist = carregar_historico_di_futuro()
+    except Exception:
+        df_hist = None
+
+    if df_hist is not None and not df_hist.empty:
+        # 2a) Se já temos taxa do snapshot, mas não temos delta intraday,
+        #     calculamos delta vs D-1.
+        if di_2_taxa is not None and (di_2_delta is None or fonte_di2 == "none"):
+            delta_d1 = _delta_di_vs_d1(df_hist, ticker_di2, di_2_taxa)
+            if delta_d1 is not None:
+                di_2_delta = delta_d1
+                fonte_di2 = "D-1"
+
+        if di_5_taxa is not None and (di_5_delta is None or fonte_di5 == "none"):
+            delta_d1 = _delta_di_vs_d1(df_hist, ticker_di5, di_5_taxa)
+            if delta_d1 is not None:
+                di_5_delta = delta_d1
+                fonte_di5 = "D-1"
+
+        # 2b) Fallback TOTAL: snapshot falhou (ou veio vazio) → usamos o
+        #     último dia disponível no histórico para nível + delta.
+        if ticker_di2 is None or di_2_taxa is None or ticker_di5 is None or di_5_taxa is None:
+            # último dia com dados
+            ultima_data_hist = df_hist["data"].max()
+            df_ult = df_hist[df_hist["data"] == ultima_data_hist].copy()
+
+            # 2 anos
+            if ticker_di2 is None or di_2_taxa is None:
+                tk2, taxa2, _ = _escolher_di_por_prazo(df_ult, anos_alvo=2.0)
+                if ticker_di2 is None:
+                    ticker_di2 = tk2
+                if di_2_taxa is None:
+                    di_2_taxa = taxa2
+
+                if di_2_taxa is not None and ticker_di2 is not None:
+                    delta_d1 = _delta_di_vs_d1(df_hist, ticker_di2, di_2_taxa)
+                    if delta_d1 is not None:
+                        di_2_delta = delta_d1
+                        fonte_di2 = "D-1"
+
+            # 5 anos
+            if ticker_di5 is None or di_5_taxa is None:
+                tk5, taxa5, _ = _escolher_di_por_prazo(df_ult, anos_alvo=5.0)
+                if ticker_di5 is None:
+                    ticker_di5 = tk5
+                if di_5_taxa is None:
+                    di_5_taxa = taxa5
+
+                if di_5_taxa is not None and ticker_di5 is not None:
+                    delta_d1 = _delta_di_vs_d1(df_hist, ticker_di5, di_5_taxa)
+                    if delta_d1 is not None:
+                        di_5_delta = delta_d1
+                        fonte_di5 = "D-1"
+
+    # 3) Sempre retorna alguma coisa (mesmo que seja tudo None)
+    return (
+        ticker_di2,
+        di_2_taxa,
+        di_2_delta,
+        fonte_di2,
+        ticker_di5,
+        di_5_taxa,
+        di_5_delta,
+        fonte_di5,
+    )
+
+
+
+# =============================================================================
 # FUNÇÃO PRINCIPAL – CARREGA TUDO
 # =============================================================================
 
@@ -301,7 +745,8 @@ def carregar_dados_curto_prazo_br() -> DadosCurtoPrazoBR:
 
     Agora:
       • Selic, CDI e PTAX vêm de dados reais da API do BCB (SGS).
-      • Ibovespa e DI Futuro ainda são placeholders (vamos plugar B3 depois).
+      • Ibovespa real via yfinance.
+      • DI Futuro 2a / 5a via snapshot B3 (di_futuro_b3).
     """
 
     # ---------------------
@@ -445,17 +890,38 @@ def carregar_dados_curto_prazo_br() -> DadosCurtoPrazoBR:
         ptax_nivel_24m=ptax_nivel_24m,
         ptax_var_12m=ptax_var_12m,
         ptax_var_24m=ptax_var_24m,
-    )
+    )   
 
     # ---------------------
     # Ativos domésticos
     # ---------------------
-    # Aqui eu mantenho:
-    #   - Curva ANBIMA real (pré 2a / 5a)
-    #   - Ibovespa e DI Futuro ainda como placeholders
-    # No próximo passo a gente pluga B3 (yfinance / API) para Ibov, DI2/DI5 etc.
-
     data_curva, taxa_2a, taxa_5a = _obter_taxas_pref_2e5_anos()
+
+    # Ibovespa (nível + variações)
+    ibov_nivel, ibov_var_dia, ibov_var_mes, ibov_var_ano = _carregar_ibovespa_curto()
+
+    # DI Futuro ~2 anos e ~5 anos (B3)
+    try:
+        (
+            ticker_di2,
+            di_2_taxa,
+            di_2_delta,
+            fonte_di2,
+            ticker_di5,
+            di_5_taxa,
+            di_5_delta,
+            fonte_di5,
+        ) = _carregar_di_futuro_2e5_anos()
+    except Exception:
+        ticker_di2 = ticker_di5 = None
+        di_2_taxa = di_2_delta = di_5_taxa = di_5_delta = None
+        fonte_di2 = fonte_di5 = "none"
+
+    # Se tenho a taxa e não tenho variação, mostra seta "flat" (0,00 p.p.)
+    if di_2_taxa is not None and di_2_delta is None:
+        di_2_delta = 0.0
+    if di_5_taxa is not None and di_5_delta is None:
+        di_5_delta = 0.0
 
     curva_obs = (
         "Curva ANBIMA consolidada (pré-fixada). "
@@ -464,19 +930,22 @@ def carregar_dados_curto_prazo_br() -> DadosCurtoPrazoBR:
     )
 
     ativos_domesticos = AtivosDomesticosCurtoPrazo(
-        ibov_nivel=128_500.0,   # TODO: plugar dado real (B3 / yfinance)
-        ibov_var_dia=0.45,      # % no dia
-        ibov_var_mes=1.95,
-        ibov_var_ano=6.12,
+        ibov_nivel=ibov_nivel,
+        ibov_var_dia=ibov_var_dia,
+        ibov_var_mes=ibov_var_mes,
+        ibov_var_ano=ibov_var_ano,
         data_curva_anbima=data_curva,
         pre_2_anos=taxa_2a,
         pre_5_anos=taxa_5a,
         curva_obs=curva_obs,
-        # TODO: DI Futuro 2a / 5a reais (usando di_futuro_b3.py)
-        di_2_anos_taxa=12.80,
-        di_2_anos_delta=-0.05,  # p.p. no dia
-        di_5_anos_taxa=12.95,
-        di_5_anos_delta=0.07,   # p.p. no dia
+        di_2_anos_taxa=di_2_taxa,
+        di_2_anos_delta=di_2_delta,
+        di_5_anos_taxa=di_5_taxa,
+        di_5_anos_delta=di_5_delta,
+        di_2_anos_ticker=ticker_di2,
+        di_5_anos_ticker=ticker_di5,
+        di_2_anos_fonte_delta=fonte_di2,
+        di_5_anos_fonte_delta=fonte_di5,
     )
 
     return DadosCurtoPrazoBR(
