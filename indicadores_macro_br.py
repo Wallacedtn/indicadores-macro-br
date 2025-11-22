@@ -44,7 +44,7 @@ def load_theme_css() -> None:
       O Streamlit reconstrói o DOM a cada rerun, então precisamos
       injetar o <style> em TODA execução do script.
     """
-    css_path = Path(r"C:/Dev/tesouro/css/theme_ion.css")
+    css_path = Path(__file__).resolve().parent / "css" / "theme_ion.css"
     try:
         css = css_path.read_text(encoding="utf-8")
     except FileNotFoundError:
