@@ -30,17 +30,21 @@ import logging
 # =============================================================================
 
 
+# =============================================================================
+# TEMA GLOBAL / CSS EXTERNO (theme_ion.css)
+# =============================================================================
+
+
 def load_theme_css() -> None:
     """
     Carrega o arquivo css/theme_ion.css (tema estilo Íon) e injeta no app.
-    Usa session_state para aplicar apenas uma vez por sessão.
-    """
-    # se já carregou uma vez nessa sessão, não faz nada
-    if st.session_state.get("_theme_ion_loaded"):
-        return
-    st.session_state["_theme_ion_loaded"] = True
 
-    css_path = Path(__file__).parent / "css" / "theme_ion.css"
+    IMPORTANTE:
+    - Não usamos mais session_state aqui.
+      O Streamlit reconstrói o DOM a cada rerun, então precisamos
+      injetar o <style> em TODA execução do script.
+    """
+    css_path = Path(__file__).resolve().parent / "css" / "theme_ion.css"
     try:
         css = css_path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -139,6 +143,11 @@ def _dois_anos_atras_str() -> str:
     dt = date.today() - relativedelta(years=2)
     return dt.strftime("%d/%m/%Y")
 
+def _quatro_anos_atras_str() -> str:
+    """Data de 4 anos atrás em dd/mm/aaaa."""
+    dt = date.today() - relativedelta(years=4)
+    return dt.strftime("%d/%m/%Y")
+
 
 def _formata_mes(dt: pd.Timestamp) -> str:
     """Formata data mensal como mm/aaaa."""
@@ -219,13 +228,21 @@ def buscar_serie_sgs(
 
 
 def buscar_selic_meta_aa() -> pd.DataFrame:
-    """Meta Selic (% a.a.). Último ano de dados."""
-    return buscar_serie_sgs(SGS_SERIES["selic_meta_aa"])
+    """Meta Selic (% a.a.). Últimos 4 anos de dados."""
+    return buscar_serie_sgs(
+        SGS_SERIES["selic_meta_aa"],
+        data_inicial=_quatro_anos_atras_str(),
+        data_final=_hoje_str(),
+    )
 
 
 def buscar_cdi_diario() -> pd.DataFrame:
-    """CDI diário (% a.d.), último ano."""
-    return buscar_serie_sgs(SGS_SERIES["cdi_diario"])
+    """CDI diário (% a.d.), últimos 2 anos de dados."""
+    return buscar_serie_sgs(
+        SGS_SERIES["cdi_diario"],
+        data_inicial=_dois_anos_atras_str(),
+        data_final=_hoje_str(),
+    )
 
 
 def buscar_ptax_venda() -> pd.DataFrame:
@@ -591,6 +608,14 @@ def resumo_inflacao(df: pd.DataFrame) -> Dict[str, float]:
 
 
 def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
+    """
+    Calcula resumo do câmbio (ou qualquer série diária):
+    - último valor
+    - variação no ano
+    - variação no mês
+    - variação em 12 meses
+    - variação em 24 meses
+    """
     if df.empty:
         return {
             "ultimo": None,
@@ -600,23 +625,38 @@ def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
             "valor_24m": None,
             "data_24m": None,
             "var_ano": None,
+            "var_mes": None,
             "var_12m": None,
             "var_24m": None,
         }
 
     df = df.sort_values("data").reset_index(drop=True)
+
     ult = df.iloc[-1]
     ultima_data = ult["data"]
     ultimo_valor = ult["valor"]
 
+    # ---------- Variação no ano ----------
     ano_ref = ultima_data.year
     df_ano = df[df["data"].dt.year == ano_ref]
     if not df_ano.empty:
         inicio_ano = df_ano.iloc[0]["valor"]
-        var_ano = (ultimo_valor / inicio_ano - 1) * 100.0
+        var_ano = (ultimo_valor / inicio_ano - 1.0) * 100.0
     else:
         var_ano = None
 
+    # ---------- Variação no mês ----------
+    mes_ref = ultima_data.month
+    df_mes = df[
+        (df["data"].dt.year == ano_ref) & (df["data"].dt.month == mes_ref)
+    ]
+    if not df_mes.empty:
+        inicio_mes = df_mes.iloc[0]["valor"]
+        var_mes = (ultimo_valor / inicio_mes - 1.0) * 100.0
+    else:
+        var_mes = None
+
+    # ---------- Variação em 12 meses ----------
     corte_12m = ultima_data - relativedelta(years=1)
     df_12m = df[df["data"] >= corte_12m]
     if not df_12m.empty:
@@ -628,6 +668,7 @@ def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
         data_12m = None
         var_12m = None
 
+    # ---------- Variação em 24 meses ----------
     corte_24m = ultima_data - relativedelta(years=2)
     df_24m = df[df["data"] >= corte_24m]
     if not df_24m.empty:
@@ -647,6 +688,7 @@ def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
         "valor_24m": valor_24m,
         "data_24m": data_24m,
         "var_ano": var_ano,
+        "var_mes": var_mes,
         "var_12m": var_12m,
         "var_24m": var_24m,
     }
@@ -907,17 +949,22 @@ def montar_tabela_focus_top5() -> pd.DataFrame:
         linha: Dict[str, str] = {"Indicador": nome_exibicao}
 
         for ano in anos:
-            valor = buscar_focus_top5_expectativa_anual(
-                indicador_sub, ano, detalhe_sub
-            )
+            # >>> IMPORTANTE: chamada SOMENTE POR POSIÇÃO <<<
+            # evita o erro: got an unexpected keyword argument 'ano'
+            valor = buscar_focus_expectativa_anual(indicador_sub, ano, detalhe_sub)
 
+            # Se for número (int ou float), formata com 2 casas decimais
             if isinstance(valor, (int, float)):
                 if eh_percentual:
-                    linha[str(ano)] = f"{valor:.2f}%"
+                    texto = f"{valor:.2f}%"
                 else:
-                    linha[str(ano)] = f"{valor:.2f}"
+                    # aqui você pode adaptar para bi/trilhões se quiser
+                    texto = f"{valor:.2f}"
             else:
-                linha[str(ano)] = valor
+                # Se vier "-", None ou outro texto, mostra como está
+                texto = valor
+
+            linha[str(ano)] = texto
 
         linha["Fonte"] = "BCB / Focus – Anuais Top5 (estatísticas)"
         linhas.append(linha)
@@ -1021,59 +1068,68 @@ def montar_tabela_inflacao() -> pd.DataFrame:
 
 
 def montar_tabela_selic_meta() -> pd.DataFrame:
+    """
+    Tabela da Selic Meta focada em níveis de política monetária:
+
+    - Nível atual
+    - Início do ano
+    - Há 12 meses
+    - Há 24 meses
+    - Há 36 meses
+    - Há 48 meses
+    """
     linhas: List[Dict[str, str]] = []
 
     try:
         df = buscar_selic_meta_aa()
-        if not df.empty:
-            df = df.sort_values("data").reset_index(drop=True)
-            ult = df.iloc[-1]
-            ultima_data = ult["data"]
-            ultimo = ult["valor"]
+        if df.empty:
+            raise ValueError("Sem dados da Selic Meta.")
 
-            ano_ref = ultima_data.year
-            df_ano = df[df["data"].dt.year == ano_ref]
-            if not df_ano.empty:
-                inicio_ano_val = df_ano.iloc[0]["valor"]
-            else:
-                inicio_ano_val = None
+        df = df.sort_values("data").reset_index(drop=True)
 
-            corte_12m = ultima_data - relativedelta(years=1)
-            df_12m = df[df["data"] >= corte_12m]
-            if not df_12m.empty:
-                nivel_12m_val = df_12m.iloc[0]["valor"]
-            else:
-                nivel_12m_val = None
+        # Última observação (nível atual)
+        ult = df.iloc[-1]
+        data_ult = ult["data"]
+        nivel_atual = float(ult["valor"])
 
-            linhas.append(
-                {
-                    "Indicador": "Selic Meta",
-                    "Data": ultima_data.strftime("%d/%m/%Y"),
-                    "Nível atual": f"{ultimo:.2f}% a.a.",
-                    "Início do ano": (
-                        f"{inicio_ano_val:.2f}% a.a."
-                        if inicio_ano_val is not None
-                        else "-"
-                    ),
-                    "Há 12 meses": (
-                        f"{nivel_12m_val:.2f}% a.a."
-                        if nivel_12m_val is not None
-                        else "-"
-                    ),
-                    "Fonte": f"BCB / SGS ({SGS_SERIES['selic_meta_aa']})",
-                }
-            )
+        # ---------- Início do ano ----------
+        ano_ref = data_ult.year
+        df_ano = df[df["data"].dt.year == ano_ref]
+        if not df_ano.empty:
+            inicio_ano_val = float(df_ano.iloc[0]["valor"])
         else:
-            linhas.append(
-                {
-                    "Indicador": "Selic Meta",
-                    "Data": "-",
-                    "Nível atual": "sem dados",
-                    "Início do ano": "-",
-                    "Há 12 meses": "-",
-                    "Fonte": "BCB / SGS",
-                }
-            )
+            inicio_ano_val = None
+
+        # ---------- função auxiliar p/ pegar nível <= data alvo ----------
+        def _nivel_ate(df_local: pd.DataFrame, data_alvo: pd.Timestamp) -> Optional[float]:
+            df_aux = df_local[df_local["data"] <= data_alvo]
+            if df_aux.empty:
+                return None
+            return float(df_aux.iloc[-1]["valor"])
+
+        # ---------- níveis há 12, 24, 36 e 48 meses ----------
+        nivel_12m = _nivel_ate(df, data_ult - relativedelta(years=1))
+        nivel_24m = _nivel_ate(df, data_ult - relativedelta(years=2))
+        nivel_36m = _nivel_ate(df, data_ult - relativedelta(years=3))
+        nivel_48m = _nivel_ate(df, data_ult - relativedelta(years=4))
+
+        def _fmt(v: Optional[float]) -> str:
+            return f"{v:.2f}% a.a." if v is not None else "-"
+
+        linhas.append(
+            {
+                "Indicador": "Selic Meta",
+                "Data": data_ult.strftime("%d/%m/%Y"),
+                "Nível atual": _fmt(nivel_atual),
+                "Início do ano": _fmt(inicio_ano_val),
+                "Há 12 meses": _fmt(nivel_12m),
+                "Há 24 meses": _fmt(nivel_24m),
+                "Há 36 meses": _fmt(nivel_36m),
+                "Há 48 meses": _fmt(nivel_48m),
+                "Fonte": f"BCB / SGS ({SGS_SERIES['selic_meta_aa']})",
+            }
+        )
+
     except Exception as e:
         linhas.append(
             {
@@ -1082,14 +1138,36 @@ def montar_tabela_selic_meta() -> pd.DataFrame:
                 "Nível atual": f"Erro: {e}",
                 "Início do ano": "-",
                 "Há 12 meses": "-",
+                "Há 24 meses": "-",
+                "Há 36 meses": "-",
+                "Há 48 meses": "-",
                 "Fonte": "BCB / SGS",
             }
         )
 
-    return pd.DataFrame(linhas)
+    # Garante ordem das colunas
+    df_out = pd.DataFrame(linhas)
+    df_out = df_out[
+        [
+            "Indicador",
+            "Data",
+            "Nível atual",
+            "Início do ano",
+            "Há 12 meses",
+            "Há 24 meses",
+            "Há 36 meses",
+            "Há 48 meses",
+            "Fonte",
+        ]
+    ]
+    return df_out
 
 
 def montar_tabela_cdi() -> pd.DataFrame:
+    """
+    Tabela do CDI (over) diário com retornos acumulados:
+    mês, ano, 12m e 24m.
+    """
     linhas: List[Dict[str, str]] = []
 
     try:
@@ -1106,6 +1184,7 @@ def montar_tabela_cdi() -> pd.DataFrame:
         ano_ref = data_ult.year
         mes_ref = data_ult.month
 
+        # ---------- CDI no mês ----------
         df_mes = df[
             (df["data"].dt.year == ano_ref) & (df["data"].dt.month == mes_ref)
         ]
@@ -1115,6 +1194,7 @@ def montar_tabela_cdi() -> pd.DataFrame:
         else:
             cdi_mes = float("nan")
 
+        # ---------- CDI no ano ----------
         df_ano = df[df["data"].dt.year == ano_ref]
         if not df_ano.empty:
             fator_ano = (1 + df_ano["valor"] / 100).prod()
@@ -1122,13 +1202,23 @@ def montar_tabela_cdi() -> pd.DataFrame:
         else:
             cdi_ano = float("nan")
 
+        # ---------- CDI em 12 meses ----------
         corte_12m = data_ult - relativedelta(years=1)
-        df_12m = df[df["data"] > corte_12m]
+        df_12m = df[df["data"] >= corte_12m]
         if not df_12m.empty:
             fator_12m = (1 + df_12m["valor"] / 100).prod()
             cdi_12m = (fator_12m - 1) * 100.0
         else:
             cdi_12m = float("nan")
+
+        # ---------- CDI em 24 meses ----------
+        corte_24m = data_ult - relativedelta(years=2)
+        df_24m = df[df["data"] >= corte_24m]
+        if not df_24m.empty:
+            fator_24m = (1 + df_24m["valor"] / 100).prod()
+            cdi_24m = (fator_24m - 1) * 100.0
+        else:
+            cdi_24m = float("nan")
 
         linhas.append(
             {
@@ -1138,6 +1228,7 @@ def montar_tabela_cdi() -> pd.DataFrame:
                 "CDI no mês": f"{cdi_mes:.2f}%" if pd.notna(cdi_mes) else "-",
                 "CDI no ano": f"{cdi_ano:.2f}%" if pd.notna(cdi_ano) else "-",
                 "CDI em 12 meses": f"{cdi_12m:.2f}%" if pd.notna(cdi_12m) else "-",
+                "CDI em 24 meses": f"{cdi_24m:.2f}%" if pd.notna(cdi_24m) else "-",
                 "Fonte": f"BCB / SGS ({SGS_SERIES['cdi_diario']})",
             }
         )
@@ -1151,6 +1242,7 @@ def montar_tabela_cdi() -> pd.DataFrame:
                 "CDI no mês": "-",
                 "CDI no ano": "-",
                 "CDI em 12 meses": "-",
+                "CDI em 24 meses": "-",
                 "Fonte": "BCB / SGS",
             }
         )
@@ -1186,6 +1278,7 @@ def montar_tabela_ptax() -> pd.DataFrame:
                 nivel_24m = "-"
 
             var_ano = f"{r['var_ano']:+.2f}%" if r["var_ano"] is not None else "-"
+            var_mes = f"{r['var_mes']:+.2f}%" if r["var_mes"] is not None else "-"
             var_12m = f"{r['var_12m']:+.2f}%" if r["var_12m"] is not None else "-"
             var_24m = f"{r['var_24m']:+.2f}%" if r["var_24m"] is not None else "-"
         else:
@@ -1194,9 +1287,11 @@ def montar_tabela_ptax() -> pd.DataFrame:
             nivel_12m = "-"
             nivel_24m = "-"
             var_ano = "-"
+            var_mes = "-"
             var_12m = "-"
             var_24m = "-"
 
+        # 👉 Aqui a ordem das colunas já vem com Var. mês antes de Var. ano
         linhas.append(
             {
                 "Indicador": "Dólar PTAX - venda",
@@ -1204,6 +1299,7 @@ def montar_tabela_ptax() -> pd.DataFrame:
                 "Nível atual": nivel_atual,
                 "Nível há 12m": nivel_12m,
                 "Nível há 24m": nivel_24m,
+                "Var. mês": var_mes,
                 "Var. ano": var_ano,
                 "Var. 12m": var_12m,
                 "Var. 24m": var_24m,
@@ -1219,6 +1315,7 @@ def montar_tabela_ptax() -> pd.DataFrame:
                 "Nível atual": f"Erro: {e}",
                 "Nível há 12m": "-",
                 "Nível há 24m": "-",
+                "Var. mês": "-",
                 "Var. ano": "-",
                 "Var. 12m": "-",
                 "Var. 24m": "-",
@@ -1226,7 +1323,184 @@ def montar_tabela_ptax() -> pd.DataFrame:
             }
         )
 
-    return pd.DataFrame(linhas)
+    # 🔽 força a ordem das colunas na tabela
+    df = pd.DataFrame(linhas)
+    ordem_colunas = [
+        "Indicador",
+        "Data",
+        "Nível atual",
+        "Nível há 12m",
+        "Nível há 24m",
+        "Var. mês",   # primeiro
+        "Var. ano",
+        "Var. 12m",
+        "Var. 24m",
+        "Fonte",
+    ]
+    df = df[ordem_colunas]
+    return df
+
+
+
+def _format_br_number(valor: float | None, casas: int = 2) -> str:
+    """
+    Formata número em padrão brasileiro, ex: 155.381,00
+    """
+    if valor is None:
+        return "-"
+    s = f"{valor:,.{casas}f}"
+    return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def montar_tabela_ibovespa() -> pd.DataFrame:
+    """
+    Monta quadro do Ibovespa (fechamento) no padrão dos demais:
+    1 linha com ano, mês, 12m e 24m.
+    """
+    linhas: List[Dict[str, str]] = []
+
+    try:
+        IPEA_BASE_URL = "https://www.ipeadata.gov.br/api/odata4"
+        IBOV_SERCODIGO = "GM366_IBVSP366"
+
+        url = f"{IPEA_BASE_URL}/ValoresSerie(SERCODIGO='{IBOV_SERCODIGO}')"
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+        valores = payload.get("value", [])
+
+        if not valores:
+            raise ValueError("Ipeadata retornou lista vazia para o Ibovespa.")
+
+        registros = []
+        for item in valores:
+            data_str = item.get("VALDATA")
+            valor = item.get("VALVALOR")
+            if not data_str or valor is None:
+                continue
+            registros.append((data_str[:10], float(valor)))
+
+        if not registros:
+            raise ValueError("Não há registros válidos do Ibovespa no Ipeadata.")
+
+        df = pd.DataFrame(registros, columns=["data", "valor"])
+        df["data"] = pd.to_datetime(df["data"])
+        df = df.sort_values("data").set_index("data")
+        close = df["valor"]
+
+        ultimo = float(close.iloc[-1])
+        data_ult = close.index[-1]
+
+        # -------- variação no ano --------
+        mask_ano = close.index.year == data_ult.year
+        serie_ano = close[mask_ano]
+        if not serie_ano.empty:
+            base_ano = float(serie_ano.iloc[0])
+            var_ano_val = (ultimo / base_ano - 1.0) * 100.0
+        else:
+            var_ano_val = None
+
+        # -------- variação no mês --------
+        mask_mes = (close.index.year == data_ult.year) & (
+            close.index.month == data_ult.month
+        )
+        serie_mes = close[mask_mes]
+        if not serie_mes.empty:
+            base_mes = float(serie_mes.iloc[0])
+            var_mes_val = (ultimo / base_mes - 1.0) * 100.0
+        else:
+            var_mes_val = None
+
+        # -------- 12m e 24m --------
+        def _pega_base_ate(data_limite):
+            serie = close[close.index <= data_limite]
+            if serie.empty:
+                return None, None
+            return float(serie.iloc[-1]), serie.index[-1]
+
+        base_12m, data_12m = _pega_base_ate(data_ult - relativedelta(years=1))
+        base_24m, data_24m = _pega_base_ate(data_ult - relativedelta(years=2))
+
+        var_12m_val = (
+            (ultimo / base_12m - 1.0) * 100.0 if base_12m is not None else None
+        )
+        var_24m_val = (
+            (ultimo / base_24m - 1.0) * 100.0 if base_24m is not None else None
+        )
+
+        # -------- formatações em string --------
+        data_str = data_ult.strftime("%d/%m/%Y")
+        nivel_atual = f"{_format_br_number(ultimo, 2)} pts"
+
+        if base_12m is not None and data_12m is not None:
+            nivel_12m = (
+                f"{_format_br_number(base_12m, 2)} "
+                f"({data_12m.strftime('%d/%m/%Y')})"
+            )
+        else:
+            nivel_12m = "-"
+
+        if base_24m is not None and data_24m is not None:
+            nivel_24m = (
+                f"{_format_br_number(base_24m, 2)} "
+                f"({data_24m.strftime('%d/%m/%Y')})"
+            )
+        else:
+            nivel_24m = "-"
+
+        var_ano = f"{var_ano_val:+.2f}%" if var_ano_val is not None else "-"
+        var_mes = f"{var_mes_val:+.2f}%" if var_mes_val is not None else "-"
+        var_12m = f"{var_12m_val:+.2f}%" if var_12m_val is not None else "-"
+        var_24m = f"{var_24m_val:+.2f}%" if var_24m_val is not None else "-"
+
+        # 👉 Aqui também: Var. mês vem antes de Var. ano
+        linhas.append(
+            {
+                "Indicador": "Ibovespa - fechamento",
+                "Data": data_str,
+                "Nível atual": nivel_atual,
+                "Nível há 12m": nivel_12m,
+                "Nível há 24m": nivel_24m,
+                "Var. mês": var_mes,
+                "Var. ano": var_ano,
+                "Var. 12m": var_12m,
+                "Var. 24m": var_24m,
+                "Fonte": "Ipeadata (GM366_IBVSP366)",
+            }
+        )
+
+    except Exception as e:
+        linhas.append(
+            {
+                "Indicador": "Ibovespa - fechamento",
+                "Data": "-",
+                "Nível atual": f"Erro: {e}",
+                "Nível há 12m": "-",
+                "Nível há 24m": "-",
+                "Var. mês": "-",
+                "Var. ano": "-",
+                "Var. 12m": "-",
+                "Var. 24m": "-",
+                "Fonte": "Ipeadata",
+            }
+        )
+
+    # 🔽 força a ordem das colunas na tabela
+    df = pd.DataFrame(linhas)
+    ordem_colunas = [
+        "Indicador",
+        "Data",
+        "Nível atual",
+        "Nível há 12m",
+        "Nível há 24m",
+        "Var. mês",   # primeiro
+        "Var. ano",
+        "Var. 12m",
+        "Var. 24m",
+        "Fonte",
+    ]
+    df = df[ordem_colunas]
+    return df
 
 
 def montar_tabela_di_futuro() -> pd.DataFrame:
@@ -1516,6 +1790,7 @@ def render_bloco1_observatorio_mercado(
     df_selic,
     df_cdi,
     df_ptax,
+    df_ibov_curto,
     df_di_fut,   # ainda passo, mas não uso mais a tabela diária
     df_hist_di,
 ):
@@ -1569,6 +1844,11 @@ def render_bloco1_observatorio_mercado(
             # Câmbio
             st.markdown("**Câmbio – Dólar PTAX (venda)**")
             st.table(df_ptax.set_index("Indicador"))
+
+            # Bolsa
+            st.markdown("**Bolsa – Ibovespa (fechamento)**")
+            st.table(df_ibov_curto.set_index("Indicador"))
+
 
             # ---------------------------------------------
             # Histórico – DI Futuro (B3) – 1 contrato por ano, próximos 5 anos
@@ -1861,17 +2141,14 @@ def render_bloco1_observatorio_mercado(
             # lista fixa de vértices
             vertices_anos = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30]
 
-            # default: 2 anos
-            if "vertice_anbima" not in st.session_state:
-                st.session_state["vertice_anbima"] = 2
-
             vertice = st.radio(
                 "Vértice (anos)",
                 options=vertices_anos,
-                format_func=lambda x: f"{x} anos",
                 horizontal=True,
+                index=1,              # 2 anos como default (posição 1 na lista)
                 key="vertice_anbima",
             )
+
 
             # DataFrame com as variações para o vértice escolhido
             df_var = montar_curva_anbima_variacoes(anos=vertice)
@@ -1898,16 +2175,23 @@ def render_bloco1_observatorio_mercado(
                     titulo: texto que vai aparecer no cabeçalho da tabela.
 
                     Retorna um DataFrame simples, pronto para ser exibido com st.table,
-                    aproveitando o CSS de tabela do tema Íon.
+                    com a taxa formatada com vírgula e 3 casas decimais.
                     """
                     df_show = (
                         df_base[["Data", nome_coluna]]
                         .rename(columns={nome_coluna: titulo})
                         .set_index("Data")
                     )
-                    # formatação numérica vai ser tratada visualmente pelo front;
-                    # aqui mantemos apenas os valores numéricos.
+
+                    # formata a coluna numérica: 3 casas decimais e vírgula
+                    df_show[titulo] = df_show[titulo].apply(
+                        lambda x: "-"
+                        if pd.isna(x)
+                        else f"{float(x):.3f}".replace(".", ",")
+                    )
+
                     return df_show
+
 
 
                 # Tabela 1 – Prefixada (juro nominal)
@@ -1916,7 +2200,7 @@ def render_bloco1_observatorio_mercado(
                     df_pref = montar_tabela_curva(
                         df_var,
                         "Juro Nominal (%)",
-                        "Curva prefixada (juro nominal)",
+                        "Taxa (% a.a.)",
                     )
                     st.table(df_pref)
 
@@ -1926,7 +2210,7 @@ def render_bloco1_observatorio_mercado(
                     df_ipca = montar_tabela_curva(
                         df_var,
                         "Juro Real (%)",
-                        "Curva IPCA+ (juro real)",
+                        "Taxa (% a.a.)",
                     )
                     st.table(df_ipca)
 
@@ -1936,7 +2220,7 @@ def render_bloco1_observatorio_mercado(
                     df_be = montar_tabela_curva(
                         df_var,
                         "Breakeven (%)",
-                        "Breakeven (inflação implícita)",
+                        "Taxa (% a.a.)",
                     )
                     st.table(df_be)
 
@@ -2019,13 +2303,9 @@ def render_bloco4_mercado_trabalho():
 def render_bloco5_atividade(df_ativ: pd.DataFrame):
     # Se vier vazio, mostra aviso amigável
     if df_ativ is None or df_ativ.empty:
-        st.markdown("### Atividade econômica – IBGE")
-        st.caption(
-            "Indicadores de volume de Varejo (PMC), Serviços (PMS) e Indústria (PIM-PF), "
-            "classificados como indicadores coincidentes do ciclo econômico."
-        )
-        st.info("Ainda não há dados de atividade econômica montados (DataFrame vazio).")
+        st.info("Ainda não há dados de atividade econômica disponíveis.")
         return
+
 
     # ---------------- TÍTULO + DESCRIÇÃO (fora do card) ----------------
     st.markdown("### Atividade econômica – IBGE")
@@ -2160,6 +2440,11 @@ def get_tabela_ptax():
     return montar_tabela_ptax()
 
 
+@st.cache_data(ttl=60 * 30)
+def get_tabela_ibovespa_curto():
+    return montar_tabela_ibovespa()
+
+
 @st.cache_data(ttl=60 * 10)
 def get_tabela_di_futuro():
     return montar_tabela_di_futuro()
@@ -2210,7 +2495,20 @@ def main():
 
     # aplica tema visual global (CSS externo)
     load_theme_css()
-    
+
+       # 🔧 Forçar comportamento “normal” das colunas
+    st.markdown(
+        """
+        <style>
+        /* Garante que as colunas não “quebrem” sozinhas para 100% */
+        div[data-testid="column"] {
+            flex: 1 1 0 !important;
+            min-width: 0 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     # 🔄 Atualiza ANBIMA + DI Futuro B3 logo que o app inicia
     with st.spinner("Atualizando curvas ANBIMA e histórico de DI Futuro B3..."):
@@ -2232,8 +2530,10 @@ def main():
         df_selic = get_tabela_selic()
         df_cdi = get_tabela_cdi()
         df_ptax = get_tabela_ptax()
+        df_ibov_curto = get_tabela_ibovespa_curto()
         df_di_fut = get_tabela_di_futuro()
         df_hist_di = get_historico_di_futuro()
+
 
     # ==========
     # LAYOUT PRINCIPAL COM TABS
@@ -2251,33 +2551,41 @@ def main():
     )
 
     with tab1:
-        render_bloco1_observatorio_mercado(
-            df_focus=df_focus,
-            df_focus_top5=df_focus_top5,
-            df_selic=df_selic,
-            df_cdi=df_cdi,
-            df_ptax=df_ptax,
-            df_di_fut=df_di_fut,
-            df_hist_di=df_hist_di,
-        )
+        with st.container():
+            render_bloco1_observatorio_mercado(
+                df_focus=df_focus,
+                df_focus_top5=df_focus_top5,
+                df_selic=df_selic,
+                df_cdi=df_cdi,
+                df_ptax=df_ptax,
+                df_ibov_curto=df_ibov_curto,
+                df_di_fut=df_di_fut,
+                df_hist_di=df_hist_di,
+            )
 
     with tab2:
-        render_bloco2_fiscal()
+        with st.container():
+            render_bloco2_fiscal()
 
     with tab3:
-        render_bloco3_setor_externo()
+        with st.container():
+            render_bloco3_setor_externo()
 
     with tab4:
-        render_bloco4_mercado_trabalho()
+        with st.container():
+            render_bloco4_mercado_trabalho()
 
     with tab5:
-        render_bloco5_atividade(df_ativ=df_ativ)
+        with st.container():
+            render_bloco5_atividade(df_ativ=df_ativ)
 
     with tab6:
-        render_bloco6_inflacao(df_infla=df_infla)
+        with st.container():
+            render_bloco6_inflacao(df_infla=df_infla)
 
     with tab7:
-        render_bloco7_credito_condicoes()
+        with st.container():
+            render_bloco7_credito_condicoes()
 
     st.write("---")
     st.caption(
