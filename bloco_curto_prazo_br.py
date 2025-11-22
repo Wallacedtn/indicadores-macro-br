@@ -31,7 +31,7 @@ ION_DELTA_NEU = ION_GREY
 
 ICON_PERCENT = """
 <div class="ion-icon">
-  <svg viewBox="0 0 24 24">
+  <svg viewBox="0 0 24 24" width="20" height="20">
     <line x1="5" y1="19" x2="19" y2="5" />
     <circle cx="8" cy="8" r="2.2" />
     <circle cx="16" cy="16" r="2.2" />
@@ -41,7 +41,7 @@ ICON_PERCENT = """
 
 ICON_CHART = """
 <div class="ion-icon">
-  <svg viewBox="0 0 24 24">
+  <svg viewBox="0 0 24 24" width="20" height="20">
     <polyline points="4 16 9 11 13 14 20 7" />
     <polyline points="4 4 4 20 20 20" />
   </svg>
@@ -50,9 +50,9 @@ ICON_CHART = """
 
 ICON_DOLLAR = """
 <div class="ion-icon">
-  <svg viewBox="0 0 24 24">
-    <line x1="12" y1="3" x2="12" y2="21" />
-    <path d="M16 7.5c0-1.66-1.79-3-4-3s-4 1.34-4 3 1.79 3 4 3 4 1.34 4 3-1.79 3-4 3-4-1.34-4-3" />
+  <svg viewBox="0 0 24 24" width="20" height="20">
+    <path d="M12 2v20" />
+    <path d="M17 7c0-2.2-2.2-3-5-3s-5 0.8-5 3 2.2 3 5 3 5 0.8 5 3-2.2 3-5 3-5-0.8-5-3" />
   </svg>
 </div>
 """
@@ -107,11 +107,7 @@ def _format_delta_br(value: float, decimals: int) -> str:
 # =============================================================================
 
 def _inject_ion_css_curto_prazo() -> None:
-    """Injeta CSS dos cards. Garante que roda só 1x por sessão."""
-    if st.session_state.get("_ion_css_curto_prazo_injected"):
-        return
-    st.session_state["_ion_css_curto_prazo_injected"] = True
-
+    """Injeta CSS dos cards (chamado em todo rerun)."""
     st.markdown(
         f"""<style>
 .ion-card {{
@@ -122,13 +118,8 @@ def _inject_ion_css_curto_prazo() -> None:
     padding: 18px 22px;
     margin-bottom: 14px;
     box-shadow: 0 0 0 1px rgba(3, 7, 18, 0.8);
-    transition:
-        transform 0.18s ease-out,
-        box-shadow 0.18s ease-out,
-        border-color 0.18s ease-out,
-        background 0.18s ease-out;
+    transition: all 0.18s ease-out;
 }}
-
 .ion-card:hover {{
     border-color: {ION_LIME};
     box-shadow: 0 18px 35px rgba(0, 0, 0, 0.6);
@@ -161,34 +152,19 @@ def _inject_ion_css_curto_prazo() -> None:
     font-weight: 600;
 }}
 
-.ion-delta-pos {{
-    color: {ION_DELTA_POS};
-    background: rgba(177, 211, 53, 0.12);
+.ion-delta-up {{
+    background: rgba(60, 179, 113, 0.15);
+    color: #7BE27B;
 }}
 
-.ion-delta-neg {{
-    color: {ION_DELTA_NEG};
-    background: rgba(255, 122, 138, 0.12);
+.ion-delta-down {{
+    background: rgba(255, 99, 132, 0.10);
+    color: #FF7B9C;
 }}
 
-.ion-delta-neu {{
-    color: {ION_DELTA_NEU};
-    background: rgba(208, 216, 208, 0.14);
-}}
-
-.ion-badge {{
-    position: absolute;
-    top: 8px;
-    right: 12px;
-    padding: 2px 9px;
-    border-radius: 999px;
-    border: 1px solid rgba(208, 216, 208, 0.45);
-    font-size: 0.60rem;
-    font-weight: 600;
-    letter-spacing: .08em;
-    text-transform: uppercase;
-    color: {ION_GREY};
-    background: rgba(10, 26, 29, 0.92);
+.ion-delta-flat {{
+    background: rgba(148, 163, 184, 0.08);
+    color: {ION_TEXT_MUTED};
 }}
 
 .ion-icon {{
@@ -209,8 +185,7 @@ def _inject_ion_css_curto_prazo() -> None:
     fill: none;
     stroke-width: 2;
 }}
-</style>
-""",
+        </style>""",
         unsafe_allow_html=True,
     )
 

@@ -30,17 +30,21 @@ import logging
 # =============================================================================
 
 
+# =============================================================================
+# TEMA GLOBAL / CSS EXTERNO (theme_ion.css)
+# =============================================================================
+
+
 def load_theme_css() -> None:
     """
     Carrega o arquivo css/theme_ion.css (tema estilo Íon) e injeta no app.
-    Usa session_state para aplicar apenas uma vez por sessão.
-    """
-    # se já carregou uma vez nessa sessão, não faz nada
-    if st.session_state.get("_theme_ion_loaded"):
-        return
-    st.session_state["_theme_ion_loaded"] = True
 
-    css_path = Path(__file__).parent / "css" / "theme_ion.css"
+    IMPORTANTE:
+    - Não usamos mais session_state aqui.
+      O Streamlit reconstrói o DOM a cada rerun, então precisamos
+      injetar o <style> em TODA execução do script.
+    """
+    css_path = Path(r"C:/Dev/tesouro/css/theme_ion.css")
     try:
         css = css_path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -1861,17 +1865,14 @@ def render_bloco1_observatorio_mercado(
             # lista fixa de vértices
             vertices_anos = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30]
 
-            # default: 2 anos
-            if "vertice_anbima" not in st.session_state:
-                st.session_state["vertice_anbima"] = 2
-
             vertice = st.radio(
                 "Vértice (anos)",
                 options=vertices_anos,
-                format_func=lambda x: f"{x} anos",
                 horizontal=True,
+                index=1,              # 2 anos como default (posição 1 na lista)
                 key="vertice_anbima",
             )
+
 
             # DataFrame com as variações para o vértice escolhido
             df_var = montar_curva_anbima_variacoes(anos=vertice)
@@ -1898,16 +1899,23 @@ def render_bloco1_observatorio_mercado(
                     titulo: texto que vai aparecer no cabeçalho da tabela.
 
                     Retorna um DataFrame simples, pronto para ser exibido com st.table,
-                    aproveitando o CSS de tabela do tema Íon.
+                    com a taxa formatada com vírgula e 3 casas decimais.
                     """
                     df_show = (
                         df_base[["Data", nome_coluna]]
                         .rename(columns={nome_coluna: titulo})
                         .set_index("Data")
                     )
-                    # formatação numérica vai ser tratada visualmente pelo front;
-                    # aqui mantemos apenas os valores numéricos.
+
+                    # formata a coluna numérica: 3 casas decimais e vírgula
+                    df_show[titulo] = df_show[titulo].apply(
+                        lambda x: "-"
+                        if pd.isna(x)
+                        else f"{float(x):.3f}".replace(".", ",")
+                    )
+
                     return df_show
+
 
 
                 # Tabela 1 – Prefixada (juro nominal)
@@ -1916,7 +1924,7 @@ def render_bloco1_observatorio_mercado(
                     df_pref = montar_tabela_curva(
                         df_var,
                         "Juro Nominal (%)",
-                        "Curva prefixada (juro nominal)",
+                        "Taxa (% a.a.)",
                     )
                     st.table(df_pref)
 
@@ -1926,7 +1934,7 @@ def render_bloco1_observatorio_mercado(
                     df_ipca = montar_tabela_curva(
                         df_var,
                         "Juro Real (%)",
-                        "Curva IPCA+ (juro real)",
+                        "Taxa (% a.a.)",
                     )
                     st.table(df_ipca)
 
@@ -1936,7 +1944,7 @@ def render_bloco1_observatorio_mercado(
                     df_be = montar_tabela_curva(
                         df_var,
                         "Breakeven (%)",
-                        "Breakeven (inflação implícita)",
+                        "Taxa (% a.a.)",
                     )
                     st.table(df_be)
 
@@ -2019,13 +2027,9 @@ def render_bloco4_mercado_trabalho():
 def render_bloco5_atividade(df_ativ: pd.DataFrame):
     # Se vier vazio, mostra aviso amigável
     if df_ativ is None or df_ativ.empty:
-        st.markdown("### Atividade econômica – IBGE")
-        st.caption(
-            "Indicadores de volume de Varejo (PMC), Serviços (PMS) e Indústria (PIM-PF), "
-            "classificados como indicadores coincidentes do ciclo econômico."
-        )
-        st.info("Ainda não há dados de atividade econômica montados (DataFrame vazio).")
+        st.info("Ainda não há dados de atividade econômica disponíveis.")
         return
+
 
     # ---------------- TÍTULO + DESCRIÇÃO (fora do card) ----------------
     st.markdown("### Atividade econômica – IBGE")
@@ -2210,7 +2214,20 @@ def main():
 
     # aplica tema visual global (CSS externo)
     load_theme_css()
-    
+
+       # 🔧 Forçar comportamento “normal” das colunas
+    st.markdown(
+        """
+        <style>
+        /* Garante que as colunas não “quebrem” sozinhas para 100% */
+        div[data-testid="column"] {
+            flex: 1 1 0 !important;
+            min-width: 0 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     # 🔄 Atualiza ANBIMA + DI Futuro B3 logo que o app inicia
     with st.spinner("Atualizando curvas ANBIMA e histórico de DI Futuro B3..."):
@@ -2251,33 +2268,40 @@ def main():
     )
 
     with tab1:
-        render_bloco1_observatorio_mercado(
-            df_focus=df_focus,
-            df_focus_top5=df_focus_top5,
-            df_selic=df_selic,
-            df_cdi=df_cdi,
-            df_ptax=df_ptax,
-            df_di_fut=df_di_fut,
-            df_hist_di=df_hist_di,
-        )
+        with st.container():
+            render_bloco1_observatorio_mercado(
+                df_focus=df_focus,
+                df_focus_top5=df_focus_top5,
+                df_selic=df_selic,
+                df_cdi=df_cdi,
+                df_ptax=df_ptax,
+                df_di_fut=df_di_fut,
+                df_hist_di=df_hist_di,
+            )
 
     with tab2:
-        render_bloco2_fiscal()
+        with st.container():
+            render_bloco2_fiscal()
 
     with tab3:
-        render_bloco3_setor_externo()
+        with st.container():
+            render_bloco3_setor_externo()
 
     with tab4:
-        render_bloco4_mercado_trabalho()
+        with st.container():
+            render_bloco4_mercado_trabalho()
 
     with tab5:
-        render_bloco5_atividade(df_ativ=df_ativ)
+        with st.container():
+            render_bloco5_atividade(df_ativ=df_ativ)
 
     with tab6:
-        render_bloco6_inflacao(df_infla=df_infla)
+        with st.container():
+            render_bloco6_inflacao(df_infla=df_infla)
 
     with tab7:
-        render_bloco7_credito_condicoes()
+        with st.container():
+            render_bloco7_credito_condicoes()
 
     st.write("---")
     st.caption(

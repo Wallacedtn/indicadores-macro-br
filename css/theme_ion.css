@@ -307,7 +307,6 @@ tbody tr:hover {
    DROPDOWN POPUP
    =========================== */
 
-/* deixa o posicionamento padrão do BaseWeb; só limpamos o fundo */
 div[data-baseweb="popover"] {
     background: transparent !important;
 }
@@ -376,7 +375,6 @@ ul[role="listbox"] li[role="option"] * {
    HOTFIX
    =========================== */
 
-/* só removemos fundo sólido, sem mexer em position */
 div[data-baseweb="popover"],
 div[data-baseweb="popover"] * {
     background-color: transparent !important;
@@ -385,52 +383,6 @@ div[data-baseweb="popover"] * {
 div[data-baseweb="menu"] * {
     background-color: transparent !important;
 }
-
-/* ===========================
-   RADIO COMO CHIPS (VÉRTICE ANBIMA)
-   =========================== */
-
-[data-testid="stRadio"]>div {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.35rem;
-}
-
-[data-testid="stRadio"] label {
-    border-radius: 999px;
-    padding: 0.25rem 0.8rem;
-    cursor: pointer;
-    border: 1px solid var(--ion-border-soft);
-    background: linear-gradient(135deg, var(--ion-panel-1), var(--ion-panel-2));
-    color: var(--ion-text-soft);
-    font-size: 0.85rem;
-}
-
-/* esconde o circulozinho padrão do radio */
-[data-testid="stRadio"] input[type="radio"] {
-    display: none;
-}
-
-/* texto dentro do chip */
-[data-testid="stRadio"] label p {
-    margin: 0;
-}
-
-/* estado selecionado */
-[data-testid="stRadio"] label[data-baseweb="radio"] [data-testid="stMarkdownContainer"],
-[data-testid="stRadio"] label[data-baseweb="radio"][aria-checked="true"],
-[data-testid="stRadio"] label[aria-checked="true"] {
-    color: var(--ion-accent);
-    border-color: var(--ion-accent-soft, var(--ion-accent));
-    box-shadow: 0 0 0 1px rgba(177, 211, 53, 0.3);
-}
-
-/* hover */
-[data-testid="stRadio"] label:hover {
-    background: var(--ion-hover-soft);
-    color: var(--ion-text-primary);
-}
-
 
 /* ========================================================================== */
 /* FIM DO TEMA ÍON                                                            */
