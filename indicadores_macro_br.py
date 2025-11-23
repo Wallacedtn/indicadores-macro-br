@@ -30,11 +30,6 @@ import logging
 # =============================================================================
 
 
-# =============================================================================
-# TEMA GLOBAL / CSS EXTERNO (theme_ion.css)
-# =============================================================================
-
-
 def load_theme_css() -> None:
     """
     Carrega o arquivo css/theme_ion.css (tema estilo Íon) e injeta no app.
@@ -1851,11 +1846,11 @@ def render_bloco1_observatorio_mercado(
 
 
             # ---------------------------------------------
-            # Histórico – DI Futuro (B3) – 1 contrato por ano, próximos 5 anos
+            # Histórico – DI Futuro (B3) – 1 contrato por ano, próximos 10 anos
             # ---------------------------------------------
             st.markdown("**Histórico – DI Futuro (B3)**")
             with st.expander(
-                "Ver evolução histórica da taxa (1 contrato por ano, próximos 5 anos)"
+                "Ver curva DI Futuro (1 contrato por ano, próximos 10 anos)"
             ):
                 if df_hist_di is None or df_hist_di.empty:
                     st.info(
@@ -1878,10 +1873,7 @@ def render_bloco1_observatorio_mercado(
                     else:
                         df_hist["volume"] = pd.NA
 
-                    # --------------------------------------
-                    # Trata taxa / ajuste:
-                    # cria coluna 'taxa_final' com fallback no ajuste
-                    # --------------------------------------
+                    # Trata taxa / ajuste → cria 'taxa_final'
                     df_hist["taxa"] = pd.to_numeric(
                         df_hist.get("taxa"), errors="coerce"
                     )
@@ -1895,10 +1887,7 @@ def render_bloco1_observatorio_mercado(
                     else:
                         df_hist["taxa_final"] = df_hist["taxa"]
 
-
-                    # --------------------------------------
                     # Extrai o ano de vencimento do ticker (ex.: DI1F26 -> 2026)
-                    # --------------------------------------
                     def _extrair_ano(ticker: str) -> Optional[int]:
                         if not isinstance(ticker, str) or len(ticker) < 2:
                             return None
@@ -1911,7 +1900,8 @@ def render_bloco1_observatorio_mercado(
 
                     # Ano de referência = ano da última data observada
                     ano_ref = int(df_hist["data"].max().year)
-                    anos_desejados = [ano_ref + i for i in range(5)]
+                    # próximos 10 anos (ano_ref, ano_ref+1, ..., ano_ref+9)
+                    anos_desejados = [ano_ref + i for i in range(10)]
 
                     # Ordem dos meses da B3 (pra fallback de liquidez)
                     ordem_meses = "FGHJKMNQUVXZ"
@@ -1923,18 +1913,17 @@ def render_bloco1_observatorio_mercado(
                         if df_ano.empty:
                             continue
 
-                        # Agrupa por ticker e calcula volume médio recente (últimos 20 dias)
+                        # agrupa por ticker e calcula volume médio dos últimos 20 pregões
                         candidatos: List[tuple[str, float]] = []
                         for t, df_t in df_ano.groupby("ticker"):
                             serie_vol = df_t.sort_values("data")["volume"].tail(20)
                             vol_medio = serie_vol.mean()
                             candidatos.append((t, vol_medio))
 
-                        # Se não tiver volume confiável, usa fallback por mês (F, G, H...)
                         candidatos_validos = [c for c in candidatos if pd.notna(c[1])]
 
                         if candidatos_validos:
-                            # escolhe o maior volume médio
+                            # escolhe o ticker com maior volume médio
                             ticker_escolhido = max(
                                 candidatos_validos, key=lambda x: x[1]
                             )[0]
@@ -1959,7 +1948,7 @@ def render_bloco1_observatorio_mercado(
                     if not tickers_ancora:
                         st.info(
                             "Não foi possível identificar contratos DI1 suficientes "
-                            "para os próximos 5 anos no histórico."
+                            "para os próximos 10 anos no histórico."
                         )
                     else:
                         st.markdown(
@@ -1967,171 +1956,105 @@ def render_bloco1_observatorio_mercado(
                             + ", ".join(tickers_ancora)
                         )
 
-                        # --------------------------------------
-                        # Gráfico: contratos âncora (linha + bolinha) – estilo Íon
-                        # --------------------------------------
-                        df_plot = (
-                            df_hist[df_hist["ticker"].isin(tickers_ancora)]
-                            .pivot(
-                                index="data",
-                                columns="ticker",
-                                values="taxa_final",
-                            )
-                            .sort_index()
-                        )
+                        # Filtra só os contratos âncora
+                        df_curva = df_hist[df_hist["ticker"].isin(tickers_ancora)].copy()
 
-                        if df_plot.shape[0] >= 2:
-                            df_long = (
-                                df_plot.reset_index()
-                                .melt(
-                                    id_vars="data",
-                                    var_name="Contrato",
-                                    value_name="Taxa",
-                                )
-                                .dropna(subset=["Taxa"])
+                        if df_curva.empty:
+                            st.info(
+                                "Ainda não há observações suficientes para exibir a curva DI Futuro."
+                            )
+                        else:
+                            # data mais recente disponível
+                            data_mais_recente = df_curva["data"].max()
+
+                            df_curva_hoje = df_curva[
+                                df_curva["data"] == data_mais_recente
+                            ].copy()
+
+                            # garante 1 linha por contrato
+                            df_curva_hoje = (
+                                df_curva_hoje
+                                .sort_values(["ticker", "data"])
+                                .groupby("ticker")
+                                .tail(1)
                             )
 
-                            # Base comum com codificação de eixos e cor
-                            base_chart = (
-                                alt.Chart(df_long)
+                            # ordena pelos anos de vencimento para formar a curva
+                            df_curva_hoje = df_curva_hoje.sort_values("ano_venc")
+
+                            # rótulo de ano para o eixo X
+                            df_curva_hoje["ano_label"] = (
+                                df_curva_hoje["ano_venc"].astype(int).astype(str)
+                            )
+
+                            curva_chart = (
+                                alt.Chart(df_curva_hoje)
+                                .mark_line(point=True)
                                 .encode(
-                                    x=alt.X("data:T", title="Data"),
-                                    y=alt.Y("Taxa:Q", title="Taxa (% a.a.)"),
-                                    color=alt.Color(
-                                        "Contrato:N",
-                                        title="Contrato",
+                                    x=alt.X(
+                                        "ano_label:O",
+                                        title="Ano de vencimento",
                                     ),
+                                    y=alt.Y(
+                                        "taxa_final:Q",
+                                        title="Taxa implícita (% a.a.)",
+                                        scale=alt.Scale(domainMin=8),
+                                    ),
+                                    tooltip=[
+                                        alt.Tooltip("ticker:N", title="Contrato"),
+                                        alt.Tooltip("ano_venc:Q", title="Ano venc."),
+                                        alt.Tooltip(
+                                            "taxa_final:Q",
+                                            title="Taxa (% a.a.)",
+                                            format=".4f",
+                                        ),
+                                        alt.Tooltip("data:T", title="Data"),
+                                    ],
                                 )
-                            )
-
-                            # Linha principal
-                            chart_line = base_chart.mark_line(strokeWidth=2)
-
-                            # Pontos nas observações
-                            chart_points = base_chart.mark_point(size=50)
-
-                            chart = (
-                                (chart_line + chart_points)
                                 .properties(
-                                    height=420,
-                                    # fundo geral do chart transparente,
-                                    # quem manda é o fundo do card do Streamlit (tema Íon)
+                                    height=320,
                                     background="transparent",
                                 )
                                 .configure_axis(
-                                    # cores dos textos dos eixos
                                     labelColor="#D4DFE6",
                                     titleColor="#D4DFE6",
-                                    # cores da grade e linha do eixo
                                     gridColor="#12313F",
                                     domainColor="#12313F",
                                 )
                                 .configure_view(
-                                    # cor de fundo **dentro** da área do gráfico
                                     fill="#071B26",
-                                    # tira a borda cinza padrão do Altair
                                     strokeWidth=0,
                                 )
-                                .configure_legend(
-                                    labelColor="#D4DFE6",
-                                    titleColor="#D4DFE6",
-                                    orient="right",
-                                    padding=8,
-                                    cornerRadius=12,
-                                    # **importante**: não colocar fill/stroke aqui,
-                                    # dá erro no Altair 5 (LegendConfig não tem esses campos)
-                                )
                             )
 
-
-                            # Faz o gráfico ocupar toda a largura disponível
-                            st.altair_chart(chart, width="stretch")
-
+                            st.altair_chart(curva_chart, width="stretch")
 
                             st.caption(
-                                "Evolução da taxa implícita (% a.a.) dos contratos DI1 "
-                                "mais líquidos (um por ano, próximos 5 anos), "
-                                "com base no histórico salvo em CSV."
+                                "Curva DI Futuro (% a.a.), com 1 contrato DI1 por ano "
+                                "(mais líquido em cada ano), usando a observação mais "
+                                "recente disponível no histórico salvo em CSV."
                             )
 
-                        else:
-                            st.info(
-                                "Ainda não há observações suficientes para exibir o gráfico."
-                            )
-
-                        # --------------------------------------
-                        # Tabela estilo Focus – Hoje, 1–4 semanas, por contrato
-                        # --------------------------------------
-                        st.markdown(
-                            "**Resumo semanal da taxa (Hoje, 1–4 semanas atrás, por contrato)**"
-                        )
-
-                        linhas_resumo: List[Dict[str, str]] = []
-
-                        for ticker in tickers_ancora:
-                            # Usa taxa_final (taxa ou ajuste)
-                            serie = (
-                                df_hist[df_hist["ticker"] == ticker]
-                                .set_index("data")["taxa_final"]
-                                .sort_index()
-                            )
-                            if serie.empty:
-                                continue
-
-                            datas = serie.index
-                            data_hoje = datas.max()
-                            valor_hoje = serie.loc[data_hoje]
-
-                            taxa_hoje = (
-                                float(valor_hoje) if pd.notna(valor_hoje) else None
-                            )
-
-                            linha: Dict[str, str] = {
-                                "Contrato": ticker,
-                                "Data hoje": data_hoje.strftime("%d/%m/%Y"),
-                                "Hoje": (
-                                    f"{taxa_hoje:.4f}%"
-                                    if taxa_hoje is not None
-                                    else "-"
-                                ),
-                            }
-
-                            horizontes = [
-                                ("Há 1 semana", 1),
-                                ("Há 2 semanas", 2),
-                                ("Há 3 semanas", 3),
-                                ("Há 4 semanas", 4),
-                            ]
-
-                            for rotulo, n_sem in horizontes:
-                                alvo = data_hoje - relativedelta(weeks=n_sem)
-                                datas_validas = datas[datas <= alvo]
-
-                                if len(datas_validas) == 0:
-                                    linha[rotulo] = "-"
-                                else:
-                                    data_ref = datas_validas.max()
-                                    valor_ref = serie.loc[data_ref]
-                                    if pd.isna(valor_ref):
-                                        linha[rotulo] = "-"
-                                    else:
-                                        taxa_ref = float(valor_ref)
-                                        linha[rotulo] = f"{taxa_ref:.4f}%"
-
-                            linhas_resumo.append(linha)
-
-                        if linhas_resumo:
-                            df_resumo = (
-                                pd.DataFrame(linhas_resumo)
+                            # Tabela com os mesmos pontos da curva
+                            df_resumo_curva = (
+                                df_curva_hoje[["ticker", "ano_venc", "data", "taxa_final"]]
+                                .assign(
+                                    # aqui a gente garante que vira inteiro e depois texto, sem milhar/decimais
+                                    Ano_venc=lambda d: d["ano_venc"].astype(int).astype(str),
+                                    Data=lambda d: d["data"].dt.strftime("%d/%m/%Y"),
+                                    Taxa=lambda d: d["taxa_final"].map(lambda v: f"{v:.4f}%"),
+                                )[["ticker", "Ano_venc", "Data", "Taxa"]]
+                                .rename(
+                                    columns={
+                                        "ticker": "Contrato",
+                                        "Ano_venc": "Ano venc.",
+                                    }
+                                )
                                 .set_index("Contrato")
                             )
-                            # Usa st.table para aplicar o estilo de tabela Íon
-                            st.table(df_resumo)
-                        else:
-                            st.info(
-                                "Ainda não há histórico suficiente para montar o resumo "
-                                "em janelas semanais para esses contratos."
-                            )
+
+                            st.table(df_resumo_curva)
+
 
 
             # -------------------------------
