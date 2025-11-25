@@ -6,7 +6,7 @@ import altair as alt
 import requests
 import pandas as pd
 import unicodedata
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 import streamlit as st
 from typing import Optional, Dict, List, Tuple
@@ -21,7 +21,18 @@ from di_futuro_b3 import (
     atualizar_historico_di_futuro,
     carregar_historico_di_futuro,
 )
+
+from ibovespa_ipea import (
+    atualizar_historico_ibovespa,
+    carregar_historico_ibovespa,
+)
+
 from bloco_curto_prazo_br import render_bloco_curto_prazo_br
+from analise_tesouro_vs_curva import (
+    comparar_tesouro_pre_vs_curva,
+    comparar_tesouro_ipca_vs_curva,
+)
+from tesouro_direto import carregar_tesouro_ultimo_dia
 import logging
 
 
@@ -719,7 +730,7 @@ def _carregar_focus_raw() -> pd.DataFrame:
     """
     url = (
         f"{FOCUS_BASE_URL}"
-        "?$top=5000"
+        "?$top=50000"
         "&$orderby=Data%20desc"
         "&$format=json"
         "&$select=Indicador,IndicadorDetalhe,Data,DataReferencia,Mediana"
@@ -753,9 +764,12 @@ def _carregar_focus_raw() -> pd.DataFrame:
 
 @lru_cache(maxsize=1)
 def _carregar_focus_top5_raw() -> pd.DataFrame:
+    """
+    Carrega o dataset de Expectativas Anuais Top5.
+    """
     url = (
         f"{FOCUS_TOP5_ANUAIS_URL}"
-        "?$top=5000"
+        "?$top=50000"
         "&$orderby=Data%20desc"
         "&$format=json"
         "&$select=Indicador,Data,DataReferencia,Mediana"
@@ -778,9 +792,19 @@ def _carregar_focus_top5_raw() -> pd.DataFrame:
     df = df[df["ano_ref"].str.isdigit()].copy()
     df["ano_ref"] = df["ano_ref"].astype(int)
 
+    # nome do indicador normalizado (IPCA, PIB, Balança comercial, etc.)
     df["indicador_norm"] = df["Indicador"].apply(_normalizar_str)
-    # esse endpoint não tem IndicadorDetalhe, então deixamos vazio
-    df["detalhe_norm"] = ""
+
+    # aqui agora usamos o IndicadorDetalhe (Saldo, Exportações, Importações, etc.)
+    if "IndicadorDetalhe" in df.columns:
+        df["detalhe_norm"] = (
+            df["IndicadorDetalhe"]
+            .fillna("")
+            .apply(_normalizar_str)
+        )
+    else:
+        # fallback defensivo (não é o caso desse endpoint, mas deixa robusto)
+        df["detalhe_norm"] = ""
 
     return df
 
@@ -791,37 +815,193 @@ def buscar_focus_expectativa_anual(
     detalhe_substr: Optional[str] = None,
 ):
     """
-    Busca a mediana mais recente do Focus para um dado indicador e ano.
-    Ex.:
-      indicador_substr = "ipca"
-      indicador_substr = "pib total"
-      indicador_substr = "selic"
-      indicador_substr = "cambio"
+    Busca a mediana MAIS RECENTE do Focus para um dado indicador e ano.
+
+    - Tenta match EXATO do nome do indicador (em vez de só .contains),
+      pra não misturar IPCA com IPCA Administrados etc.
+    - Agrupa por Data para ficar com um valor por boletim Focus.
     """
     df = _carregar_focus_raw().copy()
     if df.empty:
         return "-"
 
+    # filtra ano de referência
     mask = df["ano_ref"] == ano_desejado
 
+    # -------- filtro do indicador (IPCA, PIB, Selic, Câmbio...) --------
     ind_norm = _normalizar_str(indicador_substr)
-    mask &= df["indicador_norm"].str.contains(ind_norm, na=False)
+    col_ind = df["indicador_norm"]
 
+    # tenta primeiro match EXATO
+    mask_ind = col_ind == ind_norm
+    if not mask_ind.any():
+        # se não achar nada exato, cai pro comportamento antigo (.contains)
+        mask_ind = col_ind.str.contains(ind_norm, na=False)
+
+    mask &= mask_ind
+
+    # -------- filtro de detalhe, se usado (em alguns indicadores) --------
     if detalhe_substr:
         det_norm = _normalizar_str(detalhe_substr)
-        mask &= df["detalhe_norm"].str.contains(det_norm, na=False)
+        col_det = df["detalhe_norm"]
 
-    df_f = df[mask]
+        mask_det = col_det == det_norm
+        if not mask_det.any():
+            mask_det = col_det.str.contains(det_norm, na=False)
+
+        mask &= mask_det
+
+    df_f = df[mask].copy()
     if df_f.empty:
         return "-"
 
-    df_f = df_f.sort_values("Data", ascending=False)
-    med = df_f.iloc[0].get("Mediana", None)
+    # garante Data válida e ordena
+    df_f["Data"] = pd.to_datetime(df_f["Data"], errors="coerce")
+    df_f = df_f.dropna(subset=["Data"])
+    if df_f.empty:
+        return "-"
+
+    df_f = df_f.sort_values("Data")
+
+    # um valor por boletim (Data): pega a última Mediana de cada Data
+    df_grp = df_f.groupby("Data", as_index=False)["Mediana"].last()
+
+    med = df_grp.iloc[-1]["Mediana"]
 
     try:
         return float(med)
     except Exception:
         return "-"
+
+def _resumo_semanal_expectativa_anual(
+    indicador_substr: str,
+    ano_desejado: int,
+    detalhe_substr: Optional[str] = None,
+) -> Dict[str, Optional[float]]:
+    """
+    Calcula um resumo semanal para a mediana do Focus de um indicador/ano:
+
+      - hoje:     valor da ÚLTIMA semana (semana que contém a última data)
+      - semana_4: valor de 4 semanas atrás (4 semanas Focus)
+      - comp:     seta + nº de semanas desde o último movimento de alta/baixa
+                  (ex.: "▲ (3)", "▼ (1)", "= (2)").
+
+    A semana Focus é definida como período "W-FRI" (sábado a sexta).
+    Dentro de cada semana, usamos o ÚLTIMO valor disponível:
+
+      - se sexta não for feriado → usamos sexta
+      - se sexta for feriado → usamos o último dia útil da semana
+        (quinta, quarta, etc.)
+
+    Para o comportamento semanal ("comp"), seguimos a lógica usada no
+    relatório Focus do BC:
+
+      1) Arredondamos a mediana em 2 casas decimais;
+      2) Calculamos os deltas semana a semana;
+      3) Procuramos, de trás pra frente, o ÚLTIMO delta diferente de zero;
+      4) A seta é o sinal desse delta;
+      5) O número entre parênteses é quantas semanas se passaram desde esse
+         movimento até a semana atual (incluindo semanas estáveis).
+    """
+
+    df = _carregar_focus_raw().copy()
+    if df.empty:
+        return {}
+
+    # 1) filtro pelo ano de referência
+    mask = df["ano_ref"] == ano_desejado
+
+    # 2) filtro pelo indicador (IPCA, PIB, Selic, câmbio, etc.)
+    ind_norm = _normalizar_str(indicador_substr)
+    col_ind = df["indicador_norm"]
+
+    mask_ind = col_ind == ind_norm
+    if not mask_ind.any():
+        mask_ind = col_ind.str.contains(ind_norm, na=False)
+
+    mask &= mask_ind
+
+    # 3) filtro por detalhe (Saldo da balança, Administrados, etc.)
+    if detalhe_substr:
+        det_norm = _normalizar_str(detalhe_substr)
+        col_det = df["detalhe_norm"]
+
+        mask_det = col_det == det_norm
+        if not mask_det.any():
+            mask_det = col_det.str.contains(det_norm, na=False)
+
+        mask &= mask_det
+
+    df_f = df[mask].copy()
+    if df_f.empty:
+        return {}
+
+    # 4) garantir datas válidas
+    df_f["Data"] = pd.to_datetime(df_f["Data"], errors="coerce")
+    df_f = df_f.dropna(subset=["Data"])
+    if df_f.empty:
+        return {}
+
+    # 5) definir a semana Focus: termina na sexta (W-FRI)
+    df_f["semana_focus"] = df_f["Data"].dt.to_period("W-FRI")
+
+    # Dentro de cada semana, pegamos o ÚLTIMO valor (mais próximo da sexta)
+    df_sem = (
+        df_f.sort_values("Data")
+        .groupby("semana_focus", as_index=False)
+        .last()
+    )
+
+    if df_sem.empty:
+        return {}
+
+    # --- níveis (usamos o valor cheio, como vem da API) ---
+    valores_raw = df_sem["Mediana"].astype(float).tolist()
+    n = len(valores_raw)
+    if n == 0:
+        return {}
+
+    val_hoje = valores_raw[-1]
+    val_4 = valores_raw[-5] if n >= 5 else None  # 4 semanas atrás
+
+    # --- comportamento semanal (setas) ---
+    # Se só tem uma semana, não há histórico para comparar
+    if n == 1:
+        comp_txt = "-"
+    else:
+        # usamos a mediana arredondada em 2 casas, como o BC
+        valores = [round(v, 2) for v in valores_raw]
+
+        # deltas semana a semana
+        diffs = [valores[i] - valores[i - 1] for i in range(1, n)]
+        eps = 1e-9
+
+        # 1) procuramos, de trás pra frente, o ÚLTIMO delta diferente de zero
+        last_nonzero_idx = None  # índice (1-based) da semana do último movimento
+        last_nonzero_delta = None
+
+        for idx in range(len(diffs) - 1, -1, -1):
+            d = diffs[idx]
+            if abs(d) > eps:
+                last_nonzero_idx = idx + 1  # diffs[0] = 2ª semana
+                last_nonzero_delta = d
+                break
+
+        if last_nonzero_idx is None:
+            # série toda estável → "=" + nº de semanas estáveis
+            repeticoes = len(diffs)
+            comp_txt = f"= ({repeticoes})" if repeticoes > 0 else "-"
+        else:
+            seta = "▲" if last_nonzero_delta > 0 else "▼"
+            # nº de semanas desde esse movimento até a semana atual
+            repeticoes = n - last_nonzero_idx
+            comp_txt = f"{seta} ({repeticoes})" if repeticoes > 0 else seta
+
+    return {
+        "hoje": val_hoje,
+        "semana_4": val_4,
+        "comp": comp_txt,
+    }
 
 
 def buscar_focus_top5_expectativa_anual(
@@ -829,113 +1009,130 @@ def buscar_focus_top5_expectativa_anual(
     ano_desejado: int,
     detalhe_substr: Optional[str] = None,
 ):
+    """
+    Busca a mediana mais recente das expectativas anuais Top5 para um indicador.
+
+    OBS.: o endpoint Top5 não traz "IndicadorDetalhe", então `detalhe_substr`
+    é ignorado (mantido só para compatibilidade de assinatura).
+    """
     df = _carregar_focus_top5_raw().copy()
     if df.empty:
         return "-"
 
+    # filtra pelo ano desejado
     mask = df["ano_ref"] == ano_desejado
 
+    # filtra pelo indicador (IPCA, PIB, Selic, câmbio...)
     ind_norm = _normalizar_str(indicador_substr)
     mask &= df["indicador_norm"].str.contains(ind_norm, na=False)
-
-    if detalhe_substr:
-        det_norm = _normalizar_str(detalhe_substr)
-        mask &= df["detalhe_norm"].str.contains(det_norm, na=False)
 
     df_f = df[mask]
     if df_f.empty:
         return "-"
 
+    # pega a mediana mais recente
     df_f = df_f.sort_values("Data", ascending=False)
     med = df_f.iloc[0].get("Mediana", None)
 
     try:
         return float(med)
-    except Exception:
+    except (TypeError, ValueError):
         return "-"
 
 
 def montar_tabela_focus() -> pd.DataFrame:
     """
-    Monta a tabela consolidada de expectativas Focus por ano
-    para os principais indicadores macro.
+    Monta a tabela consolidada de expectativas Focus por ano,
+    no formato:
 
-    Usa a função buscar_focus_expectativa_anual(indicador_substr, ano_desejado, detalhe_substr)
-    para extrair a mediana de cada indicador / ano.
+        2025: [Há 4 sem., Hoje, Comp. sem.]
+        2026: [Há 4 sem., Hoje, Comp. sem.]
+        ...
+
+    Ou seja, NÃO teremos mais a coluna "Há 1 semana" para reduzir a largura.
+    As colunas usam o resumo semanal calculado em
+    _resumo_semanal_expectativa_anual (semana Focus W-FRI).
+
     """
 
-    # anos que você quer mostrar (igual ao Focus)
     anos = [2025, 2026, 2027, 2028]
 
-    # Cada tupla é:
-    # (nome que aparece na tabela,
-    #  substring do indicador na base do Focus,
-    #  substring de detalhe (se precisar filtrar mais),
-    #  se é percentual para formatar com "%")
+    # (nome exibido, substring indicador, detalhe, é percentual?)
     configs: List[Tuple[str, str, Optional[str], bool]] = [
-        # Os 4 que você já tinha:
-        ("IPCA (variação %)",                 "IPCA",                    None, True),
-        ("PIB Total (variação %)",            "PIB Total",               None, True),
-        ("Câmbio (R$/US$)",                   "Câmbio",                  None, False),
-        ("Selic (% a.a)",                     "Selic",                   None, True),
-
-        # Extras semelhantes ao quadro do Focus:
-        ("IGP-M (variação %)",                "IGP-M",                   None, True),
-        ("IPCA Administrados (variação %)",   "IPCA Administrados",      None, True),
-        ("Conta corrente (US$ bilhões)",      "Conta corrente",          None, False),
-        ("Balança comercial (US$ bilhões)",   "Balança comercial",       None, False),
-        ("Investimento direto no país (US$ bi)", "Investimento direto",  None, False),
+        ("IPCA (variação %)",                   "IPCA",                         None, True),
+        ("PIB Total (variação %)",              "PIB Total",                    None, True),
+        ("Câmbio (R\\$/US\\$)",                     "Câmbio",                      None, False),
+        ("Selic (% a.a)",                       "Selic",                        None, True),
+        ("IGP-M (variação %)",                  "IGP-M",                        None, True),
+        ("IPCA Administrados (variação %)",     "IPCA Administrados",           None, True),
+        ("Conta corrente (US$ bilhões)",        "Conta corrente",              None, False),
+        ("Balança comercial (US$ bilhões)",     "Balança comercial",           "Saldo", False),
+        ("Investimento direto no país (US$ bi)","Investimento direto",         None, False),
         ("Dívida líquida do setor público (% do PIB)",
-                                             "Dívida líquida do setor público", None, True),
-        ("Resultado primário (% do PIB)",     "Resultado primário",      None, True),
-        ("Resultado nominal (% do PIB)",      "Resultado nominal",       None, True),
+                                              "Dívida líquida do setor público", None, True),
+        ("Resultado primário (% do PIB)",       "Resultado primário",            None, True),
+        ("Resultado nominal (% do PIB)",        "Resultado nominal",             None, True),
     ]
 
-    linhas: List[Dict[str, str]] = []
+    # AGORA SÓ 3 subcolunas por ano
+    subcolunas = ["Há 4 sem.", "Hoje", "Comp. sem."]
+
+    linhas: List[List[str]] = []
 
     for nome_exibicao, indicador_sub, detalhe_sub, eh_percentual in configs:
-        linha: Dict[str, str] = {"Indicador": nome_exibicao}
+        linha: List[str] = [nome_exibicao]
 
         for ano in anos:
-            # >>> IMPORTANTE: chamada SOMENTE POR POSIÇÃO <<<
-            # evita o erro: got an unexpected keyword argument 'ano'
-            valor = buscar_focus_expectativa_anual(indicador_sub, ano, detalhe_sub)
+            resumo = _resumo_semanal_expectativa_anual(
+                indicador_sub,
+                ano,
+                detalhe_sub,
+            )
 
-            if valor is None:
-                texto = "-"
-            else:
+            if not resumo:
+                linha.extend(["-"] * len(subcolunas))
+                continue
+
+            def _fmt_val(v: Optional[float]) -> str:
+                if v is None:
+                    return "-"
                 if eh_percentual:
-                    texto = f"{valor:.2f}%"
-                else:
-                    # aqui você pode adaptar para bi/trilhões se quiser
-                    texto = f"{valor:.2f}"
+                    return f"{v:.2f}%"
+                return f"{v:.2f}"
 
-            linha[str(ano)] = texto
+            linha.append(_fmt_val(resumo.get("semana_4")))
+            linha.append(_fmt_val(resumo.get("hoje")))
+            linha.append(resumo.get("comp", "-") or "-")
 
         linhas.append(linha)
 
-    df_focus = pd.DataFrame(linhas)
-    # garante a ordem das colunas
-    df_focus = df_focus[["Indicador"] + [str(a) for a in anos]]
+    # Cabeçalho em dois níveis (Ano x Janela), igual ao que você já está usando
+    primeira_coluna = [("Indicador", "")]
+    demais_colunas = []
+    for ano in anos:
+        for label in subcolunas:
+            demais_colunas.append((str(ano), label))
+
+    colunas = primeira_coluna + demais_colunas
+    multi_cols = pd.MultiIndex.from_tuples(colunas, names=["Ano", "Janela"])
+
+    df_focus = pd.DataFrame(linhas, columns=multi_cols)
     return df_focus
 
 
 def montar_tabela_focus_top5() -> pd.DataFrame:
     """
-    Monta a tabela de expectativas anuais para IPCA, PIB, Selic e câmbio
-    usando o recurso ExpectativasMercadoAnuaisTop5 (Focus Top5).
-
-    Top5 = mediana das 5 instituições que mais acertam as projeções.
+    Tabela resumida com as expectativas Top5 (IPCA, PIB, Selic, câmbio)
+    para o ano corrente e o próximo.
     """
     ano_atual = datetime.now().year
     anos = [ano_atual, ano_atual + 1]
 
-    # mesmo conjunto de indicadores, mas com rótulo deixando claro que é Top5
     configs = [
-        ("IPCA (a.a., Top5)", "ipca", None, True),
-        ("PIB Total (var.% a.a., Top5)", "pib total", None, True),
-        ("Selic (a.a., Top5)", "selic", None, False),
-        ("Câmbio (R$/US$, Top5)", "cambio", None, False),
+        ("IPCA (a.a., Top5)",                 "ipca",       None, True),
+        ("PIB Total (var.% a.a., Top5)",      "pib total",  None, True),
+        ("Selic (a.a., Top5)",                "selic",      None, True),
+        ("Câmbio (R\\$/US\\$, Top5)",             "cambio",     None, False),
     ]
 
     linhas: List[Dict[str, str]] = []
@@ -944,19 +1141,16 @@ def montar_tabela_focus_top5() -> pd.DataFrame:
         linha: Dict[str, str] = {"Indicador": nome_exibicao}
 
         for ano in anos:
-            # >>> IMPORTANTE: chamada SOMENTE POR POSIÇÃO <<<
-            # evita o erro: got an unexpected keyword argument 'ano'
-            valor = buscar_focus_expectativa_anual(indicador_sub, ano, detalhe_sub)
+            valor = buscar_focus_top5_expectativa_anual(
+                indicador_sub, ano, detalhe_sub
+            )
 
-            # Se for número (int ou float), formata com 2 casas decimais
             if isinstance(valor, (int, float)):
                 if eh_percentual:
                     texto = f"{valor:.2f}%"
                 else:
-                    # aqui você pode adaptar para bi/trilhões se quiser
                     texto = f"{valor:.2f}"
             else:
-                # Se vier "-", None ou outro texto, mostra como está
                 texto = valor
 
             linha[str(ano)] = texto
@@ -1346,39 +1540,60 @@ def _format_br_number(valor: float | None, casas: int = 2) -> str:
     s = f"{valor:,.{casas}f}"
     return s.replace(",", "X").replace(".", ",").replace("X", ".")
 
+@st.cache_data(ttl=86400)  # cache por até 1 dia (24h)
+def obter_historico_ibovespa_inteligente(chave_dia: str) -> pd.DataFrame:
+    """
+    Atualiza o histórico do Ibovespa a partir do Ipeadata.
+
+    IMPORTANTE (comportamento):
+    - A função é cacheada por dia (usando 'chave_dia' como parte da chave).
+    - Se a atualização ONLINE der certo uma vez no dia,
+      as próximas chamadas no MESMO dia reaproveitam o mesmo DataFrame
+      (não chamam o Ipeadata de novo).
+    - Se a chamada der erro (timeout, etc.), nenhuma atualização é cacheada
+      e as próximas execuções podem tentar novamente no mesmo dia.
+    """
+    # Aqui chamamos a função que fala com o Ipeadata e atualiza o CSV.
+    # Se der erro, a exceção sobe para quem chamou (montar_tabela_ibovespa).
+    return atualizar_historico_ibovespa()
+
 
 def montar_tabela_ibovespa() -> pd.DataFrame:
     """
     Monta quadro do Ibovespa (fechamento) no padrão dos demais:
     1 linha com ano, mês, 12m e 24m.
+
+    Estratégia:
+    - Tenta atualizar o histórico local a partir do Ipeadata.
+    - Se der erro (timeout, etc.), cai para a base local em CSV.
+    - Só mostra mensagem de erro se não houver nem dado online nem base local.
     """
     linhas: List[Dict[str, str]] = []
 
     try:
-        IPEA_BASE_URL = "https://www.ipeadata.gov.br/api/odata4"
-        IBOV_SERCODIGO = "GM366_IBVSP366"
+        origem_dados = "online"
 
-        url = f"{IPEA_BASE_URL}/ValoresSerie(SERCODIGO='{IBOV_SERCODIGO}')"
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        payload = resp.json()
-        valores = payload.get("value", [])
+        # chave por dia: garante, junto com o cache, no máximo 1 atualização
+        # bem-sucedida por dia a partir do Ipeadata
+        chave_dia = date.today().strftime("%Y-%m-%d")
 
-        if not valores:
-            raise ValueError("Ipeadata retornou lista vazia para o Ibovespa.")
+        try:
+            # 1) Tenta atualizar histórico (API Ipeadata) de forma cacheada por dia
+            df_hist = obter_historico_ibovespa_inteligente(chave_dia)
+        except Exception as e_online:
+            # 2) Se falhar (timeout, erro de rede, etc.), tenta usar apenas o CSV já salvo
+            try:
+                df_hist = carregar_historico_ibovespa()
+                origem_dados = "offline"
+            except Exception:
+                # 3) Sem base local → propaga o erro original
+                raise e_online
 
-        registros = []
-        for item in valores:
-            data_str = item.get("VALDATA")
-            valor = item.get("VALVALOR")
-            if not data_str or valor is None:
-                continue
-            registros.append((data_str[:10], float(valor)))
+        if df_hist is None or df_hist.empty:
+            raise ValueError("Histórico do Ibovespa vazio.")
 
-        if not registros:
-            raise ValueError("Não há registros válidos do Ibovespa no Ipeadata.")
-
-        df = pd.DataFrame(registros, columns=["data", "valor"])
+        # Garante tipos e ordenação
+        df = df_hist.copy()
         df["data"] = pd.to_datetime(df["data"])
         df = df.sort_values("data").set_index("data")
         close = df["valor"]
@@ -1386,7 +1601,7 @@ def montar_tabela_ibovespa() -> pd.DataFrame:
         ultimo = float(close.iloc[-1])
         data_ult = close.index[-1]
 
-        # -------- variação no ano --------
+        # ---------- variação no ano ----------
         mask_ano = close.index.year == data_ult.year
         serie_ano = close[mask_ano]
         if not serie_ano.empty:
@@ -1395,7 +1610,7 @@ def montar_tabela_ibovespa() -> pd.DataFrame:
         else:
             var_ano_val = None
 
-        # -------- variação no mês --------
+        # ---------- variação no mês ----------
         mask_mes = (close.index.year == data_ult.year) & (
             close.index.month == data_ult.month
         )
@@ -1406,7 +1621,7 @@ def montar_tabela_ibovespa() -> pd.DataFrame:
         else:
             var_mes_val = None
 
-        # -------- 12m e 24m --------
+        # ---------- 12m e 24m ----------
         def _pega_base_ate(data_limite):
             serie = close[close.index <= data_limite]
             if serie.empty:
@@ -1423,23 +1638,17 @@ def montar_tabela_ibovespa() -> pd.DataFrame:
             (ultimo / base_24m - 1.0) * 100.0 if base_24m is not None else None
         )
 
-        # -------- formatações em string --------
+        # ---------- formatações em string ----------
         data_str = data_ult.strftime("%d/%m/%Y")
         nivel_atual = f"{_format_br_number(ultimo, 2)} pts"
 
         if base_12m is not None and data_12m is not None:
-            nivel_12m = (
-                f"{_format_br_number(base_12m, 2)} "
-                f"({data_12m.strftime('%d/%m/%Y')})"
-            )
+            nivel_12m = f"{_format_br_number(base_12m, 2)} pts"
         else:
             nivel_12m = "-"
 
         if base_24m is not None and data_24m is not None:
-            nivel_24m = (
-                f"{_format_br_number(base_24m, 2)} "
-                f"({data_24m.strftime('%d/%m/%Y')})"
-            )
+            nivel_24m = f"{_format_br_number(base_24m, 2)} pts"
         else:
             nivel_24m = "-"
 
@@ -1448,7 +1657,11 @@ def montar_tabela_ibovespa() -> pd.DataFrame:
         var_12m = f"{var_12m_val:+.2f}%" if var_12m_val is not None else "-"
         var_24m = f"{var_24m_val:+.2f}%" if var_24m_val is not None else "-"
 
-        # 👉 Aqui também: Var. mês vem antes de Var. ano
+        if origem_dados == "online":
+            fonte = "Ipeadata (GM366_IBVSP366)"
+        else:
+            fonte = "Ipeadata (GM366_IBVSP366) – base local"
+
         linhas.append(
             {
                 "Indicador": "Ibovespa - fechamento",
@@ -1460,16 +1673,16 @@ def montar_tabela_ibovespa() -> pd.DataFrame:
                 "Var. ano": var_ano,
                 "Var. 12m": var_12m,
                 "Var. 24m": var_24m,
-                "Fonte": "Ipeadata (GM366_IBVSP366)",
+                "Fonte": fonte,
             }
         )
 
-    except Exception as e:
+    except Exception:
         linhas.append(
             {
                 "Indicador": "Ibovespa - fechamento",
                 "Data": "-",
-                "Nível atual": f"Erro: {e}",
+                "Nível atual": "Indisponível (falha ao obter dados)",
                 "Nível há 12m": "-",
                 "Nível há 24m": "-",
                 "Var. mês": "-",
@@ -1480,22 +1693,22 @@ def montar_tabela_ibovespa() -> pd.DataFrame:
             }
         )
 
-    # 🔽 força a ordem das colunas na tabela
-    df = pd.DataFrame(linhas)
+    # força a ordem das colunas na tabela
+    df_saida = pd.DataFrame(linhas)
     ordem_colunas = [
         "Indicador",
         "Data",
         "Nível atual",
         "Nível há 12m",
         "Nível há 24m",
-        "Var. mês",   # primeiro
+        "Var. mês",
         "Var. ano",
         "Var. 12m",
         "Var. 24m",
         "Fonte",
     ]
-    df = df[ordem_colunas]
-    return df
+    df_saida = df_saida[ordem_colunas]
+    return df_saida
 
 
 def montar_tabela_di_futuro() -> pd.DataFrame:
@@ -1793,15 +2006,14 @@ def render_bloco1_observatorio_mercado(
     Estrutura:
     - Aba "Brasil"
         - Sub-aba "Curto prazo":
-            - Selic Meta, CDI acumulado e câmbio PTAX
-            - Histórico DI Futuro (B3) com gráfico + tabela semanal (hoje, 1–4 semanas)
-            - Curva de juros – ANBIMA (prefixado x IPCA+)
+            - Selic Meta, CDI acumulado, câmbio PTAX e Ibovespa
+        - Sub-aba "Curvas & Tesouro":
+            - Curva de juros – ANBIMA (prefixado x IPCA+ x breakeven)
+            - Histórico DI Futuro (B3) com tabela resumida (1 contrato por ano)
+            - Oportunidades na curva – Tesouro vs ANBIMA
         - Sub-aba "Expectativas":
             - Focus – Mediana (consenso do mercado)
             - Focus – Top 5 (instituições mais assertivas)
-    - Aba "Mundo"
-        - Indicadores globais de curto prazo — em construção
-        - Expectativas de mercado – Global — em construção
     """
 
     tab_br, tab_mundo = st.tabs(["Brasil", "Mundo"])
@@ -1810,7 +2022,9 @@ def render_bloco1_observatorio_mercado(
     # ABA BRASIL
     # ==========================
     with tab_br:
-        subtab_indic_br, subtab_exp_br = st.tabs(["Curto prazo", "Expectativas"])
+        subtab_indic_br, subtab_exp_br, subtab_curvas_tesouro = st.tabs(
+            ["Curto prazo", "Expectativas", "Curvas & Tesouro"]
+        )
 
         # -------- Indicadores BR --------
         with subtab_indic_br:
@@ -1824,12 +2038,12 @@ def render_bloco1_observatorio_mercado(
             st.markdown("### Outros indicadores de curto prazo – Brasil")
             st.caption(
                 "Quadros detalhados com Selic meta, CDI acumulado, câmbio PTAX e "
-                "histórico do DI Futuro, complementando os cards acima."
+                "Ibovespa, complementando os cards acima."
             )
+
 
             # Selic
             st.markdown("**Taxa básica – Selic Meta**")
-            # Usamos st.table para aproveitar diretamente o CSS de tabelas Íon
             st.table(df_selic.set_index("Indicador"))
 
             # CDI
@@ -1842,9 +2056,263 @@ def render_bloco1_observatorio_mercado(
 
             # Bolsa
             st.markdown("**Bolsa – Ibovespa (fechamento)**")
-            st.table(df_ibov_curto.set_index("Indicador"))
+            st.table(df_ibov_curto.set_index("Indicador"))           
+            
 
+        # -------- Curvas & Tesouro BR --------
+        with subtab_curvas_tesouro:
+            # -------------------------------
+            # Curva de juros – ANBIMA
+            # -------------------------------
 
+            vertices_anos = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30]
+
+            vertice = st.radio(
+                "Vértice (anos)",
+                options=vertices_anos,
+                horizontal=True,
+                index=1,  # 2 anos
+                key="vertice_anbima",
+            )
+
+            df_var = montar_curva_anbima_variacoes(anos=vertice)
+
+            if df_var.empty:
+                st.info(
+                    "Ainda não há histórico suficiente para esse vértice. "
+                    "Conforme o tempo passar, o painel vai acumulando "
+                    "observações diárias das curvas ANBIMA."
+                )
+            else:
+                col_pref, col_ipca, col_breakeven = st.columns(3)
+
+                def montar_tabela_curva(
+                    df_base: pd.DataFrame,
+                    nome_coluna: str,
+                    titulo: str,
+                ) -> pd.DataFrame:
+                    df_show = (
+                        df_base[["Data", nome_coluna]]
+                        .rename(columns={nome_coluna: titulo})
+                        .set_index("Data")
+                    )
+
+                    df_show[titulo] = df_show[titulo].apply(
+                        lambda x: "-"
+                        if pd.isna(x)
+                        else f"{float(x):.3f}".replace(".", ",")
+                    )
+                    return df_show
+
+                # Tabela 1 – Prefixada (juro nominal)
+                with col_pref:
+                    st.markdown("**Curva prefixada (juro nominal)**")
+                    df_pref = montar_tabela_curva(
+                        df_var,
+                        "Juro Nominal (%)",
+                        "Taxa (% a.a.)",
+                    )
+                    st.table(df_pref)
+
+                # Tabela 2 – IPCA+ (juro real)
+                with col_ipca:
+                    st.markdown("**Curva IPCA+ (juro real)**")
+                    df_ipca = montar_tabela_curva(
+                        df_var,
+                        "Juro Real (%)",
+                        "Taxa (% a.a.)",
+                    )
+                    st.table(df_ipca)
+
+                # Tabela 3 – Breakeven
+                with col_breakeven:
+                    st.markdown("**Breakeven (inflação implícita)**")
+                    df_be = montar_tabela_curva(
+                        df_var,
+                        "Breakeven (%)",
+                        "Taxa (% a.a.)",
+                    )
+                    st.table(df_be)
+
+            # -------------------------------
+            # Oportunidades na curva – Tesouro vs ANBIMA
+            # -------------------------------
+            st.markdown("### Oportunidades na curva – Tesouro vs ANBIMA")
+            st.caption(
+                "Títulos do Tesouro Direto comparados com a curva limpa da dívida pública "
+                "(ANBIMA). Spreads positivos (Barato) indicam que o Tesouro paga acima "
+                "da curva para o mesmo prazo (anos)."
+            )
+
+            with st.spinner("Carregando oportunidades em Tesouro Direto..."):
+                try:
+                    df_pre = get_comparacao_tesouro_pre_vs_curva()
+                    df_ipca = get_comparacao_tesouro_ipca_vs_curva()
+
+                    # Datas de referência
+                    data_tesouro_ref = None
+                    data_curva_ref = None
+                    for df_tmp in (df_pre, df_ipca):
+                        if df_tmp is not None and not df_tmp.empty:
+                            if (
+                                data_tesouro_ref is None
+                                and "data_base_tesouro" in df_tmp.columns
+                            ):
+                                data_tesouro_ref = df_tmp["data_base_tesouro"].iloc[0]
+                            if (
+                                data_curva_ref is None
+                                and "data_curva_anbima" in df_tmp.columns
+                            ):
+                                data_curva_ref = df_tmp["data_curva_anbima"].iloc[0]
+
+                    if (df_pre is None or df_pre.empty) and (
+                        df_ipca is None or df_ipca.empty
+                    ):
+                        st.info(
+                            "Não foi possível carregar oportunidades em Tesouro Direto hoje."
+                        )
+                    else:
+                        # Família (prefixado x IPCA+)
+                        familia_escolhida = st.radio(
+                            "Família de título",
+                            ["Tesouro Prefixado", "Tesouro IPCA+"],
+                            key="familia_tesouro_curva",
+                            horizontal=True,
+                        )
+
+                        if familia_escolhida == "Tesouro Prefixado":
+                            df_base = df_pre.copy()
+                            col_taxa_curva = "taxa_pre_anbima"
+                            label_taxa_curva = "Curva pré ANBIMA (% a.a.)"
+                        else:
+                            df_base = df_ipca.copy()
+                            col_taxa_curva = "taxa_ipca_anbima"
+                            label_taxa_curva = "Curva real ANBIMA (% a.a.)"
+
+                        if df_base is None or df_base.empty:
+                            st.info("Sem dados disponíveis para essa família de títulos.")
+                        else:
+                            # Filtro por sinal
+                            sinais_disponiveis = ["Barato", "No preço", "Caro"]
+                            padrao = {"Barato": True, "No preço": True, "Caro": False}
+
+                            col_s1, col_s2, col_s3 = st.columns(3)
+                            flags = {}
+                            with col_s1:
+                                flags["Barato"] = st.checkbox(
+                                    "Barato",
+                                    value=padrao["Barato"],
+                                    key="chk_barato_curva",
+                                )
+                            with col_s2:
+                                flags["No preço"] = st.checkbox(
+                                    "No preço",
+                                    value=padrao["No preço"],
+                                    key="chk_nopreco_curva",
+                                )
+                            with col_s3:
+                                flags["Caro"] = st.checkbox(
+                                    "Caro",
+                                    value=padrao["Caro"],
+                                    key="chk_caro_curva",
+                                )
+
+                            sinais_ativos = [
+                                s for s in sinais_disponiveis if flags.get(s, False)
+                            ]
+                            if not sinais_ativos:
+                                st.info(
+                                    "Nenhum sinal selecionado. Marque ao menos uma opção "
+                                    "(Barato, No preço ou Caro)."
+                                )
+                            else:
+                                df_filtrado = df_base[df_base["Sinal"].isin(sinais_ativos)]
+
+                                if df_filtrado.empty:
+                                    st.info(
+                                        "Não há títulos com os sinais selecionados "
+                                        "nas condições atuais de mercado."
+                                    )
+                                else:
+                                    df_show = df_filtrado.copy()
+
+                                    # Taxas em % com 2 casas
+                                    for col in ["taxa_compra", col_taxa_curva]:
+                                        if col in df_show.columns:
+                                            df_show[col] = df_show[col].map(
+                                                lambda x: f"{x:.2f}"
+                                                if pd.notna(x)
+                                                else "-"
+                                            )
+
+                                    # Spread em bps sem casa decimal
+                                    if "spread_bps" in df_show.columns:
+                                        df_show["spread_bps"] = df_show[
+                                            "spread_bps"
+                                        ].map(
+                                            lambda x: f"{x:.0f}"
+                                            if pd.notna(x)
+                                            else "-"
+                                        )
+
+                                    renomear = {
+                                        "nome_titulo": "Título",
+                                        "data_vencimento": "Vencimento",
+                                        "prazo_anos": "Prazo (anos)",
+                                        "taxa_compra": "Tesouro (% a.a.)",
+                                        col_taxa_curva: label_taxa_curva,
+                                        "spread_bps": "Spread x curva (bps)",
+                                    }
+                                    df_show = df_show.rename(columns=renomear)
+
+                                    colunas_ordem = [
+                                        "Título",
+                                        "Vencimento",
+                                        "Prazo (anos)",
+                                        "Tesouro (% a.a.)",
+                                        label_taxa_curva,
+                                        "Spread x curva (bps)",
+                                        "Sinal",
+                                    ]
+                                    colunas_existentes = [
+                                        c for c in colunas_ordem if c in df_show.columns
+                                    ]
+                                    df_show = df_show[colunas_existentes]
+
+                                    tabela_out = df_show.copy()
+                                    if "Título" in tabela_out.columns:
+                                        tabela_out = tabela_out.set_index("Título")
+                                    st.table(tabela_out)
+
+                                    legenda_partes = []
+                                    if data_tesouro_ref is not None:
+                                        try:
+                                            dt_ref = pd.to_datetime(
+                                                data_tesouro_ref
+                                            ).strftime("%d/%m/%Y")
+                                        except Exception:
+                                            dt_ref = str(data_tesouro_ref)
+                                        legenda_partes.append(
+                                            f"Tesouro Direto – dados de {dt_ref}."
+                                        )
+                                    if data_curva_ref is not None:
+                                        try:
+                                            dc_ref = pd.to_datetime(
+                                                data_curva_ref
+                                            ).strftime("%d/%m/%Y")
+                                        except Exception:
+                                            dc_ref = str(data_curva_ref)
+                                        legenda_partes.append(
+                                            f"Curva ANBIMA (ETTJ soberana) – dados de {dc_ref}."
+                                        )
+
+                                    if legenda_partes:
+                                        st.caption("Fontes: " + " ".join(legenda_partes))
+
+                except Exception as e:
+                    st.warning(
+                        f"Não foi possível carregar a comparação Tesouro x Curva ANBIMA: {e}"
+                    )
             # ---------------------------------------------
             # Histórico – DI Futuro (B3) – 1 contrato por ano, próximos 10 anos
             # ---------------------------------------------
@@ -1906,268 +2374,122 @@ def render_bloco1_observatorio_mercado(
                     # Ordem dos meses da B3 (pra fallback de liquidez)
                     ordem_meses = "FGHJKMNQUVXZ"
 
-                    tickers_ancora: List[str] = []
-
+                    # Para cada ano desejado, escolhe um contrato representativo
+                    contratos_escolhidos = []
                     for ano in anos_desejados:
-                        df_ano = df_hist[df_hist["ano_venc"] == ano]
-                        if df_ano.empty:
+                        subset = df_hist[df_hist["ano_venc"] == ano]
+                        if subset.empty:
                             continue
 
-                        # agrupa por ticker e calcula volume médio dos últimos 20 pregões
-                        candidatos: List[tuple[str, float]] = []
-                        for t, df_t in df_ano.groupby("ticker"):
-                            serie_vol = df_t.sort_values("data")["volume"].tail(20)
-                            vol_medio = serie_vol.mean()
-                            candidatos.append((t, vol_medio))
+                        # Pega só a última data de cada contrato
+                        subset = subset.sort_values(["ticker", "data"])
+                        subset_ult = subset.groupby("ticker").tail(1)
 
-                        candidatos_validos = [c for c in candidatos if pd.notna(c[1])]
+                        # Escolhe o contrato com maior volume; se empate, usa ordem_meses
+                        subset_ult = subset_ult.copy()
+                        subset_ult["volume"] = subset_ult["volume"].fillna(0)
 
-                        if candidatos_validos:
-                            # escolhe o ticker com maior volume médio
-                            ticker_escolhido = max(
-                                candidatos_validos, key=lambda x: x[1]
-                            )[0]
-                        else:
-                            # fallback: menor mês na ordem FGHI...
-                            melhor = None
-                            melhor_idx = 999
-                            for t, _ in candidatos:
-                                mes_code = t[-3:-2]  # letra do mês
-                                try:
-                                    idx_mes = ordem_meses.index(mes_code)
-                                except ValueError:
-                                    idx_mes = 999
-                                if idx_mes < melhor_idx:
-                                    melhor_idx = idx_mes
-                                    melhor = t
-                            ticker_escolhido = melhor
+                        # separa mês-letra
+                        subset_ult["mes_letra"] = subset_ult["ticker"].str[-3:-2]
 
-                        if ticker_escolhido and ticker_escolhido not in tickers_ancora:
-                            tickers_ancora.append(ticker_escolhido)
+                        def _ordem_mes(letra: str) -> int:
+                            try:
+                                return ordem_meses.index(letra)
+                            except ValueError:
+                                return len(ordem_meses)
 
-                    if not tickers_ancora:
+                        subset_ult["ordem_mes"] = subset_ult["mes_letra"].apply(_ordem_mes)
+
+                        subset_ult = subset_ult.sort_values(
+                            ["volume", "ordem_mes"], ascending=[False, True]
+                        )
+
+                        contrato_escolhido = subset_ult.iloc[0]
+                        contratos_escolhidos.append(contrato_escolhido)
+
+                    if not contratos_escolhidos:
                         st.info(
-                            "Não foi possível identificar contratos DI1 suficientes "
-                            "para os próximos 10 anos no histórico."
+                            "Não foi possível selecionar contratos representativos de DI Futuro."
                         )
                     else:
+                        df_curva_hoje = pd.DataFrame(contratos_escolhidos)
+
+                        # Ordena por ano de vencimento
+                        df_curva_hoje = df_curva_hoje.sort_values("ano_venc")
+
                         st.markdown(
-                            "Contratos considerados (1 por ano, mais líquidos): "
-                            + ", ".join(tickers_ancora)
+                            "Tabela – 1 contrato de DI Futuro por ano (próximos 10 anos)"
                         )
-
-                        # Filtra só os contratos âncora
-                        df_curva = df_hist[df_hist["ticker"].isin(tickers_ancora)].copy()
-
-                        if df_curva.empty:
-                            st.info(
-                                "Ainda não há observações suficientes para exibir a curva DI Futuro."
+                        df_resumo_curva = (
+                            df_curva_hoje[["ticker", "ano_venc", "data", "taxa_final"]]
+                            .assign(
+                                Ano_venc=lambda d: d["ano_venc"].astype(int).astype(str),
+                                Data=lambda d: d["data"].dt.strftime("%d/%m/%Y"),
+                                Taxa=lambda d: d["taxa_final"].map(
+                                    lambda v: f"{v:.4f}%"
+                                ),
+                            )[["ticker", "Ano_venc", "Data", "Taxa"]]
+                            .rename(
+                                columns={
+                                    "ticker": "Contrato",
+                                    "Ano_venc": "Ano venc.",
+                                }
                             )
-                        else:
-                            # data mais recente disponível
-                            data_mais_recente = df_curva["data"].max()
+                            .set_index("Contrato")
+                        )
+                        st.table(df_resumo_curva)
 
-                            df_curva_hoje = df_curva[
-                                df_curva["data"] == data_mais_recente
-                            ].copy()
-
-                            # garante 1 linha por contrato
-                            df_curva_hoje = (
-                                df_curva_hoje
-                                .sort_values(["ticker", "data"])
-                                .groupby("ticker")
-                                .tail(1)
-                            )
-
-                            # ordena pelos anos de vencimento para formar a curva
-                            df_curva_hoje = df_curva_hoje.sort_values("ano_venc")
-
-                            # rótulo de ano para o eixo X
-                            df_curva_hoje["ano_label"] = (
-                                df_curva_hoje["ano_venc"].astype(int).astype(str)
-                            )
-
-                            curva_chart = (
-                                alt.Chart(df_curva_hoje)
-                                .mark_line(point=True)
-                                .encode(
-                                    x=alt.X(
-                                        "ano_label:O",
-                                        title="Ano de vencimento",
-                                    ),
-                                    y=alt.Y(
-                                        "taxa_final:Q",
-                                        title="Taxa implícita (% a.a.)",
-                                        scale=alt.Scale(domainMin=8),
-                                    ),
-                                    tooltip=[
-                                        alt.Tooltip("ticker:N", title="Contrato"),
-                                        alt.Tooltip("ano_venc:Q", title="Ano venc."),
-                                        alt.Tooltip(
-                                            "taxa_final:Q",
-                                            title="Taxa (% a.a.)",
-                                            format=".4f",
-                                        ),
-                                        alt.Tooltip("data:T", title="Data"),
-                                    ],
-                                )
-                                .properties(
-                                    height=320,
-                                    background="transparent",
-                                )
-                                .configure_axis(
-                                    labelColor="#D4DFE6",
-                                    titleColor="#D4DFE6",
-                                    gridColor="#12313F",
-                                    domainColor="#12313F",
-                                )
-                                .configure_view(
-                                    fill="#071B26",
-                                    strokeWidth=0,
-                                )
-                            )
-
-                            st.altair_chart(curva_chart, width="stretch")
-
-                            st.caption(
-                                "Curva DI Futuro (% a.a.), com 1 contrato DI1 por ano "
-                                "(mais líquido em cada ano), usando a observação mais "
-                                "recente disponível no histórico salvo em CSV."
-                            )
-
-                            # Tabela com os mesmos pontos da curva
-                            df_resumo_curva = (
-                                df_curva_hoje[["ticker", "ano_venc", "data", "taxa_final"]]
-                                .assign(
-                                    # aqui a gente garante que vira inteiro e depois texto, sem milhar/decimais
-                                    Ano_venc=lambda d: d["ano_venc"].astype(int).astype(str),
-                                    Data=lambda d: d["data"].dt.strftime("%d/%m/%Y"),
-                                    Taxa=lambda d: d["taxa_final"].map(lambda v: f"{v:.4f}%"),
-                                )[["ticker", "Ano_venc", "Data", "Taxa"]]
-                                .rename(
-                                    columns={
-                                        "ticker": "Contrato",
-                                        "Ano_venc": "Ano venc.",
-                                    }
-                                )
-                                .set_index("Contrato")
-                            )
-
-                            st.table(df_resumo_curva)
-
-
-
-            # -------------------------------
-            # Curva de juros – ANBIMA
-            # -------------------------------
-
-            # lista fixa de vértices
-            vertices_anos = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30]
-
-            vertice = st.radio(
-                "Vértice (anos)",
-                options=vertices_anos,
-                horizontal=True,
-                index=1,              # 2 anos como default (posição 1 na lista)
-                key="vertice_anbima",
-            )
-
-
-            # DataFrame com as variações para o vértice escolhido
-            df_var = montar_curva_anbima_variacoes(anos=vertice)
-
-
-            if df_var.empty:
-                st.info(
-                    "Ainda não há histórico suficiente para esse vértice. "
-                    "Conforme o tempo passar, o painel vai acumulando "
-                    "observações diárias das curvas ANBIMA."
-                )
-            else:
-                # vamos mostrar as 3 curvas em 3 tabelas lado a lado
-                col_pref, col_ipca, col_breakeven = st.columns(3)
-
-                def montar_tabela_curva(
-                    df_base: pd.DataFrame,
-                    nome_coluna: str,
-                    titulo: str,
-                ) -> pd.DataFrame:
-                    """
-                    df_base: df_var completo
-                    nome_coluna: nome da coluna em df_var ("Juro Nominal (%)", ...)
-                    titulo: texto que vai aparecer no cabeçalho da tabela.
-
-                    Retorna um DataFrame simples, pronto para ser exibido com st.table,
-                    com a taxa formatada com vírgula e 3 casas decimais.
-                    """
-                    df_show = (
-                        df_base[["Data", nome_coluna]]
-                        .rename(columns={nome_coluna: titulo})
-                        .set_index("Data")
-                    )
-
-                    # formata a coluna numérica: 3 casas decimais e vírgula
-                    df_show[titulo] = df_show[titulo].apply(
-                        lambda x: "-"
-                        if pd.isna(x)
-                        else f"{float(x):.3f}".replace(".", ",")
-                    )
-
-                    return df_show
-
-
-
-                # Tabela 1 – Prefixada (juro nominal)
-                with col_pref:
-                    st.markdown("**Curva prefixada (juro nominal)**")
-                    df_pref = montar_tabela_curva(
-                        df_var,
-                        "Juro Nominal (%)",
-                        "Taxa (% a.a.)",
-                    )
-                    st.table(df_pref)
-
-                # Tabela 2 – IPCA+ (juro real)
-                with col_ipca:
-                    st.markdown("**Curva IPCA+ (juro real)**")
-                    df_ipca = montar_tabela_curva(
-                        df_var,
-                        "Juro Real (%)",
-                        "Taxa (% a.a.)",
-                    )
-                    st.table(df_ipca)
-
-                # Tabela 3 – Breakeven
-                with col_breakeven:
-                    st.markdown("**Breakeven (inflação implícita)**")
-                    df_be = montar_tabela_curva(
-                        df_var,
-                        "Breakeven (%)",
-                        "Taxa (% a.a.)",
-                    )
-                    st.table(df_be)
-
-
-                    
         # -------- Expectativas BR --------
         with subtab_exp_br:
             st.markdown("### Expectativas de mercado – Brasil (Focus)")
-            st.caption(
-                "Projeções anuais do Focus, com comparação entre o consenso (Mediana) "
-                "e o grupo das instituições mais assertivas (Top 5)."
-            )
+
+            # descobre a data mais recente nas bases do Focus (Mediana e Top5)
+            try:
+                df_raw_focus = _carregar_focus_raw()
+                data_mediana = (
+                    df_raw_focus["Data"].max()
+                    if not df_raw_focus.empty
+                    else None
+                )
+            except Exception:
+                data_mediana = None
+
+            try:
+                df_raw_top5 = _carregar_focus_top5_raw()
+                data_top5 = (
+                    df_raw_top5["Data"].max()
+                    if not df_raw_top5.empty
+                    else None
+                )
+            except Exception:
+                data_top5 = None
+
+            # funçãozinha auxiliar para formatar a data em texto
+            def _fmt_data(d):
+                if d is None or pd.isna(d):
+                    return "sem data disponível"
+                try:
+                    return pd.to_datetime(d).strftime("%d/%m/%Y")
+                except Exception:
+                    return str(d)
+
+            data_mediana_txt = _fmt_data(data_mediana)
+            data_top5_txt = _fmt_data(data_top5)
 
             st.markdown("**Focus – Mediana (consenso do mercado)**")
             st.caption(
-                "Mediana das projeções de todas as instituições participantes do boletim Focus."
+                f"Mediana das projeções de todas as instituições participantes "
+                f"do boletim Focus. Dados de {data_mediana_txt}."
             )
             st.table(df_focus.set_index("Indicador"))
 
             st.markdown("**Focus – Top 5 (instituições mais assertivas)**")
             st.caption(
-                "Mediana das projeções das 5 instituições com melhor desempenho histórico no Focus."
+                f"Mediana das projeções das 5 instituições com melhor "
+                f"desempenho histórico no Focus. Dados de {data_top5_txt}."
             )
             st.table(df_focus_top5.set_index("Indicador"))
+
 
     # ==========================
     # ABA MUNDO
@@ -2327,6 +2649,23 @@ def render_bloco7_credito_condicoes():
 # WRAPPERS CACHEADOS (Streamlit) PARA AS TABELAS
 # =============================================================================
 
+@st.cache_data(ttl=86400)  # 1 dia
+def get_comparacao_tesouro_pre_vs_curva():
+    """
+    Calcula a comparação Tesouro Prefixado x Curva Pré ANBIMA
+    e deixa o resultado em cache por 1 dia.
+    """
+    return comparar_tesouro_pre_vs_curva()
+
+
+@st.cache_data(ttl=86400)  # 1 dia
+def get_comparacao_tesouro_ipca_vs_curva():
+    """
+    Calcula a comparação Tesouro IPCA+ x Curva Real ANBIMA
+    e deixa o resultado em cache por 1 dia.
+    """
+    return comparar_tesouro_ipca_vs_curva()
+
 
 @st.cache_data(ttl=60 * 30)  # 30 minutos
 def get_tabela_inflacao():
@@ -2396,18 +2735,29 @@ def atualizar_dados_externos():
     Atualiza os dados que ficam salvos em CSV fora do app principal:
     - Curvas ANBIMA (prefixada, DI, IPCA+)
     - Histórico dos contratos DI Futuro (B3)
-    """
-    # Atualiza curvas ANBIMA
-    try:
-        atualizar_todas_as_curvas()
-    except Exception as e:
-        st.warning(f"Não foi possível atualizar curvas ANBIMA: {e}")
 
-    # Atualiza histórico DI Futuro B3
-    try:
-        atualizar_historico_di_futuro()
-    except Exception as e:
-        st.warning(f"Não foi possível atualizar histórico DI Futuro B3: {e}")
+    Se alguma chamada der erro, a exceção sobe para quem chamou.
+    """
+    # Se ANBIMA ou DI Futuro falharem, vamos deixar a exceção subir.
+    # O tratamento (warning) será feito na camada de cache.
+    atualizar_todas_as_curvas()
+    atualizar_historico_di_futuro()
+
+@st.cache_data(ttl=86400)  # 86400 segundos = 24 horas
+def atualizar_dados_externos_cache(chave_dia: str) -> bool:
+    """
+    Executa a atualização das curvas ANBIMA e do histórico de DI Futuro B3
+    no máximo UMA vez por dia (por servidor).
+
+    Regras:
+    - Se ANBIMA + DI Futuro atualizarem com sucesso, a função retorna True
+      e esse resultado fica cacheado para o 'chave_dia' informado.
+      => Próximas chamadas no mesmo dia NÃO batem de novo nas APIs.
+    - Se alguma chamada lançar exceção, nada é cacheado, e a exceção sobe.
+      => Próximas chamadas no mesmo dia podem tentar atualizar de novo.
+    """
+    atualizar_dados_externos()
+    return True
 
 
 def main():
@@ -2433,9 +2783,19 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # 🔄 Atualiza ANBIMA + DI Futuro B3 logo que o app inicia
+    # 🔄 Atualiza ANBIMA + DI Futuro B3 no máximo 1 vez por dia (por servidor)
+    chave_dia = date.today().strftime("%Y-%m-%d")
     with st.spinner("Atualizando curvas ANBIMA e histórico de DI Futuro B3..."):
-        atualizar_dados_externos()
+        try:
+            atualizar_dados_externos_cache(chave_dia)
+        except Exception as e:
+            st.warning(
+                "Não foi possível atualizar curvas ANBIMA / histórico de DI Futuro B3 "
+                "neste momento. Serão usados os últimos dados salvos em disco."
+            )
+            logging.exception(
+                "Erro ao atualizar dados externos (ANBIMA / DI Futuro B3): %s", e
+            )
 
     st.title("Observatório Macro")
     st.caption(

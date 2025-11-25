@@ -336,7 +336,7 @@ def _carregar_historico_full() -> pd.DataFrame:
 def montar_curva_anbima_hoje() -> pd.DataFrame:
     """
     Retorna uma tabela com:
-        - Data da curva (data_curva)
+        - data_curva (data de referência da curva)
         - Vértice (anos)     [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30]
         - Juro Nominal (%)
         - Juro Real (%)
@@ -347,6 +347,9 @@ def montar_curva_anbima_hoje() -> pd.DataFrame:
     """
     df_hist = _carregar_historico_full()
     if df_hist.empty:
+        return pd.DataFrame()
+
+    if "data_curva" not in df_hist.columns:
         return pd.DataFrame()
 
     data_mais_recente = df_hist["data_curva"].max()
@@ -360,15 +363,24 @@ def montar_curva_anbima_hoje() -> pd.DataFrame:
     linhas: List[dict] = []
 
     for v in vertices:
+        # Juro nominal vem da curva pré (TAXA_PREF)
         nominal = _extrair_vertice_dia(df_dia, v, "TAXA_PREF")
+        # Juro real vem da curva IPCA+ (TAXA_IPCA)
         real = _extrair_vertice_dia(df_dia, v, "TAXA_IPCA")
+
+        # Breakeven = nominal - real (aprox. inflação implícita)
         breakeven = None
         if nominal is not None and real is not None:
             breakeven = nominal - real
 
+
+        if nominal is None and real is None and breakeven is None:
+            # pula vértice se não tiver nada
+            continue
+
         linhas.append(
             {
-                "Data da curva": data_mais_recente,
+                "data_curva": data_mais_recente,
                 "Vértice (anos)": v,
                 "Juro Nominal (%)": nominal,
                 "Juro Real (%)": real,
