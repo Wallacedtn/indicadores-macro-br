@@ -186,6 +186,29 @@ def _inject_ion_css_curto_prazo() -> None:
     fill: none;
     stroke-width: 2;
 }}
+
+/* Badge no canto superior direito */
+.ion-badge {{
+    position: absolute;
+    top: 10px;
+    right: 14px;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 0.70rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    background: rgba(148, 163, 184, 0.12);
+    color: {ION_TEXT_MUTED};
+}}
+
+/* Subtexto embaixo do delta (ex.: mês/ano, 12m/24m) */
+.ion-subtext {{
+    margin-top: 6px;
+    font-size: 0.78rem;
+    color: {ION_TEXT_MUTED};
+    opacity: 0.9;
+}}
         </style>""",
         unsafe_allow_html=True,
     )
@@ -206,6 +229,7 @@ def metric_card(
     delta_is_pp: bool = False,
     badge: Optional[str] = None,
     icon_html: Optional[str] = None,
+    subtext: Optional[str] = None,
 ) -> None:
     """
     Desenha um card:
@@ -217,6 +241,7 @@ def metric_card(
           ▼ coral (delta < 0)
           ↔ cinza (delta == 0)
       - badge opcional (ex.: INTRADAY, VS COPOM)
+      - subtexto opcional embaixo (ex.: 'fechou X p.p. desde o início do ano')
     """
 
     # valor principal
@@ -257,6 +282,7 @@ def metric_card(
         else ""
     )
     icon_block = icon_html or ""
+    subtext_html = f"<div class='ion-subtext'>{subtext}</div>" if subtext else ""
 
     html = f"""<div class="ion-card">
   {badge_html}
@@ -264,6 +290,7 @@ def metric_card(
   <div class="ion-label">{label}</div>
   <div class="ion-value">{display_value}</div>
   {delta_html}
+  {subtext_html}
 </div>
 """
     st.markdown(html, unsafe_allow_html=True)
@@ -273,7 +300,11 @@ def metric_card(
 # BLOCO PRINCIPAL
 # =============================================================================
 
-def render_bloco_curto_prazo_br() -> None:
+def render_bloco_curto_prazo_br(
+    ibov_nivel_atual: Optional[float] = None,
+    ibov_var_ano: Optional[float] = None,
+) -> None:
+
     """
     Renderiza o bloco “Indicadores de Curto Prazo – Brasil”
     em estilo dashboard, usando dados de dados_curto_prazo_br.
@@ -327,6 +358,9 @@ background:rgba(10,26,29,0.95);">
         if selic_atual is not None and selic_ultima is not None:
             selic_delta = selic_atual - selic_ultima
 
+        # subtexto simples explicando o delta
+        selic_subtext = "Δ vs última decisão do Copom"
+
         metric_card(
             "Selic meta",
             selic_atual,
@@ -336,12 +370,26 @@ background:rgba(10,26,29,0.95);">
             delta_is_pp=True,
             badge="vs Copom",
             icon_html=ICON_PERCENT,
+            subtext=selic_subtext,
         )
+
 
     # CDI do dia – Δ p.p. vs dia útil anterior (valor em %)
     with col2:
         cdi_dia = getattr(moeda, "cdi_dia", None)
         cdi_delta = getattr(moeda, "cdi_variacao_dia", None)
+
+        # Monta texto: "mês: X,XX% | ano: Y,YY%"
+        cdi_mes = getattr(moeda, "cdi_acumulado_mes", None)
+        cdi_ano = getattr(moeda, "cdi_no_ano", None)
+
+        cdi_parts = []
+        if cdi_mes is not None:
+            cdi_parts.append("mês: " + _format_value_br(cdi_mes, "{:.2f}") + "%")
+        if cdi_ano is not None:
+            cdi_parts.append("ano: " + _format_value_br(cdi_ano, "{:.2f}") + "%")
+        cdi_subtext = " | ".join(cdi_parts) if cdi_parts else None
+
         metric_card(
             "CDI do dia",
             cdi_dia,
@@ -351,12 +399,25 @@ background:rgba(10,26,29,0.95);">
             delta_is_pp=True,
             badge="vs D-1",
             icon_html=ICON_PERCENT,
+            subtext=cdi_subtext,
         )
 
     # PTAX – dólar – Δ % intraday
     with col3:
         ptax = getattr(moeda, "ptax_fechamento", None)
         ptax_var_dia = getattr(moeda, "ptax_variacao_dia", None)
+
+        # Monta texto: "12m: X,XX% | 24m: Y,YY%"
+        ptax_var_12m = getattr(moeda, "ptax_var_12m", None)
+        ptax_var_24m = getattr(moeda, "ptax_var_24m", None)
+
+        fx_parts = []
+        if ptax_var_12m is not None:
+            fx_parts.append("12m: " + _format_delta_br(ptax_var_12m, 2) + "%")
+        if ptax_var_24m is not None:
+            fx_parts.append("24m: " + _format_delta_br(ptax_var_24m, 2) + "%")
+        fx_subtext = " | ".join(fx_parts) if fx_parts else None
+
         metric_card(
             "PTAX – dólar (R$)",
             ptax,
@@ -366,6 +427,7 @@ background:rgba(10,26,29,0.95);">
             delta_is_pct=True,
             badge="intraday",
             icon_html=ICON_DOLLAR,
+            subtext=fx_subtext,
         )
 
     st.markdown("&nbsp;", unsafe_allow_html=True)
@@ -373,28 +435,50 @@ background:rgba(10,26,29,0.95);">
     # ======================= LINHA 2 ==========================
     col4, col5, col6 = st.columns(3)
 
-    # Ibovespa – pts – Δ % intraday (com centavos)
+    # Ibovespa – pts – Δ % vs D-1 (com nivel vindo do Ipeadata)
     with col4:
-        ibov_nivel = getattr(ativos, "ibov_nivel", None)
-        ibov_var_dia = getattr(ativos, "ibov_var_dia", None)
+        # Nível: continua usando o fechamento do Ipea (df_ibov_curto),
+        # caindo para o valor antigo se vier None
+        if ibov_nivel_atual is not None:
+            valor_ibov = ibov_nivel_atual
+        else:
+            valor_ibov = getattr(ativos, "ibov_nivel", None)
+
+        # Delta diário vs D-1
+        delta_ibov = getattr(ativos, "ibov_var_dia", None)
+        badge_ibov = "vs D-1"
+
+        # Monta texto: "mês: X,XX% | ano: Y,YY%"
+        ibov_var_mes = getattr(ativos, "ibov_var_mes", None)
+        ibov_var_ano_val = getattr(ativos, "ibov_var_ano", None)
+
+        ibov_parts = []
+        if ibov_var_mes is not None:
+            ibov_parts.append("mês: " + _format_delta_br(ibov_var_mes, 2) + "%")
+        if ibov_var_ano_val is not None:
+            ibov_parts.append("ano: " + _format_delta_br(ibov_var_ano_val, 2) + "%")
+        ibov_subtext = " | ".join(ibov_parts) if ibov_parts else None
+
         metric_card(
             "Ibovespa – pts",
-            ibov_nivel,
-            ibov_var_dia,
+            valor_ibov,
+            delta_ibov,
             fmt_value="{:,.2f}",
             value_is_pct=False,
             delta_is_pct=True,
-            badge="vs D-1",  # antes: "intraday"
+            badge=badge_ibov,
             icon_html=ICON_CHART,
+            subtext=ibov_subtext,
         )
 
 
-    # DI Futuro ~2 anos – Δ p.p.
+    # DI Futuro ~2 anos – Δ p.p. no dia + abriu/fechou desde o início do ano
     with col5:
         di2_taxa = getattr(ativos, "di_2_anos_taxa", None)
         di2_delta = getattr(ativos, "di_2_anos_delta", None)
         di2_fonte = getattr(ativos, "di_2_anos_fonte_delta", None)
         di2_ticker = getattr(ativos, "di_2_anos_ticker", None)
+        di2_delta_ano = getattr(ativos, "di_2_anos_delta_ano", None)
 
         # título: se tiver ticker, usa ele; senão, mantém o texto antigo
         if di2_ticker:
@@ -402,6 +486,7 @@ background:rgba(10,26,29,0.95);">
         else:
             titulo_di2 = "DI Futuro ~2 anos (B3)"
 
+        # badge: origem da variação diária (intraday ou vs D-1)
         if di2_delta is None:
             badge_di2 = None
         else:
@@ -412,6 +497,27 @@ background:rgba(10,26,29,0.95);">
             else:
                 badge_di2 = None
 
+        # subtexto: abriu/fechou desde o início do ano
+        subtext_di2 = None
+        if di2_delta_ano is not None:
+            # se for muito pequeno (<= 0,01 p.p.), considera estável
+            if abs(di2_delta_ano) < 0.01:
+                subtext_di2 = "estável vs início do ano"
+            elif di2_delta_ano > 0:
+                # abriu
+                subtext_di2 = (
+                    "abriu "
+                    + _format_delta_br(abs(di2_delta_ano), 2)
+                    + " p.p. desde o início do ano"
+                )
+            else:
+                # fechou
+                subtext_di2 = (
+                    "fechou "
+                    + _format_delta_br(abs(di2_delta_ano), 2)
+                    + " p.p. desde o início do ano"
+                )
+
         metric_card(
             titulo_di2,
             di2_taxa,
@@ -420,16 +526,18 @@ background:rgba(10,26,29,0.95);">
             value_is_pct=False,
             delta_is_pp=True,
             badge=badge_di2,
-            icon_html=ICON_CHART,
+            icon_html=ICON_PERCENT,
+            subtext=subtext_di2,
         )
 
 
-    # DI Futuro ~5 anos – Δ p.p.
+    # DI Futuro ~5 anos – Δ p.p. no dia + abriu/fechou desde o início do ano
     with col6:
         di5_taxa = getattr(ativos, "di_5_anos_taxa", None)
         di5_delta = getattr(ativos, "di_5_anos_delta", None)
         di5_fonte = getattr(ativos, "di_5_anos_fonte_delta", None)
         di5_ticker = getattr(ativos, "di_5_anos_ticker", None)
+        di5_delta_ano = getattr(ativos, "di_5_anos_delta_ano", None)
 
         if di5_ticker:
             titulo_di5 = f"{di5_ticker} (B3)"
@@ -446,6 +554,23 @@ background:rgba(10,26,29,0.95);">
             else:
                 badge_di5 = None
 
+        subtext_di5 = None
+        if di5_delta_ano is not None:
+            if abs(di5_delta_ano) < 0.01:
+                subtext_di5 = "estável vs início do ano"
+            elif di5_delta_ano > 0:
+                subtext_di5 = (
+                    "abriu "
+                    + _format_delta_br(abs(di5_delta_ano), 2)
+                    + " p.p. desde o início do ano"
+                )
+            else:
+                subtext_di5 = (
+                    "fechou "
+                    + _format_delta_br(abs(di5_delta_ano), 2)
+                    + " p.p. desde o início do ano"
+                )
+
         metric_card(
             titulo_di5,
             di5_taxa,
@@ -454,7 +579,8 @@ background:rgba(10,26,29,0.95);">
             value_is_pct=False,
             delta_is_pp=True,
             badge=badge_di5,
-            icon_html=ICON_CHART,
+            icon_html=ICON_PERCENT,
+            subtext=subtext_di5,
         )
         
 

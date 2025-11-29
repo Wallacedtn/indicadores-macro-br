@@ -10,6 +10,13 @@ from typing import List, Optional
 
 import pandas as pd
 import requests
+from pathlib import Path
+
+# Pasta onde vamos guardar o CSV bruto do Tesouro Direto
+BASE_DIR = Path(__file__).resolve().parent
+TD_DATA_DIR = BASE_DIR / "data" / "curvas_tesouro" / "tesouro_direto"
+TD_DATA_PATH = TD_DATA_DIR / "tesouro_direto_bruto.csv"
+
 
 TESOURO_CSV_URL = (
     "https://www.tesourotransparente.gov.br/ckan/dataset/"
@@ -21,19 +28,71 @@ TESOURO_CSV_URL = (
 @lru_cache(maxsize=1)
 def carregar_tesouro_bruto() -> pd.DataFrame:
     """
-    Baixa o CSV oficial de Preço e Taxa do Tesouro Direto (Tesouro Transparente)
-    e devolve um DataFrame com o histórico completo.
+    Carrega o histórico de Preço e Taxa do Tesouro Direto.
+
+    Comportamento:
+    - 1º tenta ler do CSV local em data/tesouro_direto/tesouro_direto_bruto.csv
+    - Se der erro ou não existir, faz o download do Tesouro Transparente
+      e salva o CSV para as próximas vezes.
     """
-    resp = requests.get(TESOURO_CSV_URL, timeout=30)
+    # 1) Tenta primeiro o CSV local
+    try:
+        if TD_DATA_PATH.exists():
+            df = pd.read_csv(TD_DATA_PATH)
+            if not df.empty:
+                return df
+    except Exception:
+        # Se o CSV estiver corrompido, ignora e força o download
+        pass
+
+    # 2) Fallback: baixa on-line do Tesouro Transparente
+    resp = requests.get(TESOURO_CSV_URL, timeout=60)
     resp.raise_for_status()
 
-    # CSV do governo normalmente vem com ; e vírgula como decimal
+
     df = pd.read_csv(
         io.StringIO(resp.text),
         sep=";",
         decimal=",",
         encoding="latin1",
     )
+
+    # 3) Salva o CSV bruto para uso futuro
+    try:
+        TD_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        df.to_csv(TD_DATA_PATH, index=False)
+    except Exception:
+        # Não queremos quebrar se der erro só na hora de salvar
+        pass
+
+    return df
+
+def atualizar_cache_tesouro_bruto() -> pd.DataFrame:
+    """
+    Força o download do CSV oficial do Tesouro Direto e atualiza o cache local.
+
+    Usado pelo job pesado (atualiza_dados_pesados.py), fora do Streamlit.
+    """
+    resp = requests.get(TESOURO_CSV_URL, timeout=60)
+    resp.raise_for_status()
+
+
+    df = pd.read_csv(
+        io.StringIO(resp.text),
+        sep=";",
+        decimal=",",
+        encoding="latin1",
+    )
+
+    TD_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    df.to_csv(TD_DATA_PATH, index=False)
+
+    # Limpa o cache da função carregar_tesouro_bruto para usar o dado novo
+    try:
+        carregar_tesouro_bruto.cache_clear()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
     return df
 
 

@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.WARNING)
 # CONFIGURAÇÃO DE PASTAS / ARQUIVOS
 # =============================================================================
 
-BASE_DIR = "data/curvas_anbima"
+BASE_DIR = "data/curvas_tesouro/curvas_anbima"
 os.makedirs(BASE_DIR, exist_ok=True)
 
 # Arquivo único com toda a informação de curva:

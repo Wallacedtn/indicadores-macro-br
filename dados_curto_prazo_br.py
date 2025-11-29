@@ -9,22 +9,35 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
 from functools import lru_cache
 from dateutil.relativedelta import relativedelta
+def _to_float_scalar(val: Any) -> float:
+    """
+    Converte de forma segura um valor vindo de pandas para float nativo.
+
+    - Se for Series (mesmo de 1 elemento), usa .iloc[0], como o pandas recomenda.
+    - Se já for escalar (int, float, numpy scalar), só aplica float() normal.
+    """
+    if isinstance(val, pd.Series):
+        # pega o primeiro elemento da Series
+        return float(val.iloc[0])
+    return float(val)
+
 from di_futuro_b3 import (
     baixar_snapshot_di_futuro,   # snapshot do dia
     carregar_historico_di_futuro # di1_historico.csv
 )  # DI Futuro B
 
+
 # Caminho para o CSV de curvas ANBIMA (já usado no bloco de Curvas)
 BASE_DIR = Path(__file__).parent
-CAMINHO_CURVAS_ANBIMA = BASE_DIR / "data" / "curvas_anbima_full.csv"
+CAMINHO_CURVAS_ANBIMA = (
+    BASE_DIR / "data" / "curvas_tesouro" / "curvas_anbima" / "curvas_anbima_full.csv"
+)
 
-# Caminho para o histórico local do Ibovespa (últimos fechamentos)
-CAMINHO_IBOV_HIST = BASE_DIR / "data" / "ibov_historico.csv"
-
-# Ipeadata – série diária do Ibovespa (fechamento)
-IPEA_BASE_URL = "https://www.ipeadata.gov.br/api/odata4"
-IBOV_SERCODIGO = "GM366_IBVSP366"  # troque aqui pelo SERCODIGO real do Ipeadata
-
+# Diretório de cache para séries SGS usadas no curto prazo (Selic/CDI/PTAX)
+SGS_DIR = BASE_DIR / "data" / "curto_prazo"
+CAMINHO_SGS_SELIC = SGS_DIR / "selic_meta_aa.csv"
+CAMINHO_SGS_CDI = SGS_DIR / "cdi_diario.csv"
+CAMINHO_SGS_PTAX = SGS_DIR / "ptax_venda.csv"
 
 # =============================================================================
 # DATACLASSES – ESTRUTURA DE DADOS DO BLOCO CURTO PRAZO
@@ -78,6 +91,10 @@ class AtivosDomesticosCurtoPrazo:
     di_5_anos_taxa: Optional[float] = None
     di_5_anos_delta: Optional[float] = None  # var. em p.p. no dia
 
+    # NOVO: variação desde o início do ano (mesmo ticker / mesmo prazo)
+    di_2_anos_delta_ano: Optional[float] = None
+    di_5_anos_delta_ano: Optional[float] = None
+
     # NOVO: tickers que estão sendo usados em cada card
     di_2_anos_ticker: Optional[str] = None
     di_5_anos_ticker: Optional[str] = None
@@ -115,6 +132,10 @@ def _um_ano_atras_str() -> str:
 
 def _dois_anos_atras_str() -> str:
     dt = date.today() - relativedelta(years=2)
+    return dt.strftime("%d/%m/%Y")
+
+def _quatro_anos_atras_str() -> str:
+    dt = date.today() - relativedelta(years=4)
     return dt.strftime("%d/%m/%Y")
 
 
@@ -165,6 +186,15 @@ def buscar_selic_meta_aa(
     data_inicial: Optional[str] = None,
     data_final: Optional[str] = None,
 ) -> pd.DataFrame:
+    """
+    Meta Selic (% a.a.), vinda da API SGS.
+
+    Esta função é usada pelo script de atualização de cache
+    (dados_curto_prazo_br.py / atualiza_dados_pesados.py).
+
+    O comportamento "offline-first" para o SITE fica em
+    carregar_dados_curto_prazo_br(), que lê os CSVs em data/curto_prazo.
+    """
     return buscar_serie_sgs(
         SGS_SERIES["selic_meta_aa"],
         data_inicial=data_inicial,
@@ -176,6 +206,11 @@ def buscar_cdi_diario(
     data_inicial: Optional[str] = None,
     data_final: Optional[str] = None,
 ) -> pd.DataFrame:
+    """
+    CDI diário (% a.d.), vindo da API SGS.
+
+    Também é usado pelos scripts de atualização de cache.
+    """
     return buscar_serie_sgs(
         SGS_SERIES["cdi_diario"],
         data_inicial=data_inicial,
@@ -183,15 +218,26 @@ def buscar_cdi_diario(
     )
 
 
-def buscar_ptax_venda() -> pd.DataFrame:
+def buscar_ptax_venda(
+    data_inicial: Optional[str] = None,
+    data_final: Optional[str] = None,
+) -> pd.DataFrame:
     """
-    Últimos 2 anos de PTAX venda (você usa isso também no bloco de tabelas).
+    Dólar PTAX venda (R$/US$), vindo da API SGS.
+
+    Por padrão, usamos os últimos 2 anos se datas não forem passadas.
     """
+    if data_inicial is None:
+        data_inicial = _dois_anos_atras_str()
+    if data_final is None:
+        data_final = _hoje_str()
+
     return buscar_serie_sgs(
         SGS_SERIES["ptax_venda"],
-        data_inicial=_dois_anos_atras_str(),
-        data_final=_hoje_str(),
+        data_inicial=data_inicial,
+        data_final=data_final,
     )
+
 
 
 def resumo_cambio(df: pd.DataFrame) -> Dict[str, Optional[float]]:
@@ -313,90 +359,82 @@ def _obter_taxas_pref_2e5_anos() -> Tuple[Optional[date], Optional[float], Optio
 # HELPERS – IBOVESPA E DI FUTURO
 # =============================================================================
 
+@lru_cache(maxsize=366)
+def _obter_serie_ibov(hoje_str: str) -> Optional[pd.Series]:
+    """Carrega a série histórica do Ibovespa a partir do CSV local.
 
-def _carregar_ibovespa_curto() -> Tuple[float, float, float, float]:
-    """
-    Carrega o Ibovespa (fechamento diário) diretamente do Ipeadata
-    e calcula:
-
-      - nível atual (último fechamento)
-      - variação no dia (%)
-      - variação no mês (%)
-      - variação no ano (%)
-
-    Se a chamada ao Ipeadata falhar (timeout, etc.),
-    devolve valores neutros para não derrubar o app.
+    100% off-line:
+      - Lê sempre o CSV (carregar_historico_ibovespa)
+      - Não faz nenhuma requisição on-line
     """
     try:
-        # Monta URL da série no Ipeadata
-        url = f"{IPEA_BASE_URL}/ValoresSerie(SERCODIGO='{IBOV_SERCODIGO}')"
+        from ibovespa_ipea import carregar_historico_ibovespa
 
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        payload = resp.json()
-        valores = payload.get("value", [])
+        df_hist = carregar_historico_ibovespa()
+        if df_hist is None or df_hist.empty:
+            return None
 
-        if not valores:
-            raise RuntimeError("Ipeadata retornou lista vazia para o Ibovespa.")
+        df_hist = df_hist.copy()
+        df_hist["data"] = pd.to_datetime(df_hist["data"])
+        df_hist = df_hist.set_index("data").sort_index()
 
-        # Monta lista (data, fechamento)
-        registros = []
-        for item in valores:
-            data_str = item.get("VALDATA")
-            valor = item.get("VALVALOR")
-            if not data_str or valor is None:
-                continue
-            # VALDATA costuma vir como "yyyy-MM-ddT00:00:00" – pegamos só a parte da data
-            registros.append((data_str[:10], float(valor)))
+        serie = df_hist["valor"].astype(float)
+        if serie.empty:
+            return None
 
-        if not registros:
-            raise RuntimeError("Não consegui extrair registros válidos de Ibovespa do Ipeadata.")
-
-        df = pd.DataFrame(registros, columns=["data", "fechamento"])
-        df["data"] = pd.to_datetime(df["data"])
-        df = df.sort_values("data").set_index("data")
-
-        close = df["fechamento"]
-
-        # Nível atual = último fechamento
-        ultimo_close = float(close.iloc[-1])
-
-        # Variação no dia (%): último vs penúltimo
-        if len(close) >= 2:
-            close_ontem = float(close.iloc[-2])
-            var_dia = (ultimo_close / close_ontem - 1.0) * 100.0
-        else:
-            var_dia = 0.0
-
-        # Data do último fechamento
-        idx_ult = close.index[-1]
-        ano_ult = idx_ult.year
-        mes_ult = idx_ult.month
-
-        # Variação no mês (%): último vs primeiro do mês
-        mask_mes = (close.index.year == ano_ult) & (close.index.month == mes_ult)
-        df_mes = close[mask_mes]
-        if not df_mes.empty:
-            close_ini_mes = float(df_mes.iloc[0])
-            var_mes = (ultimo_close / close_ini_mes - 1.0) * 100.0
-        else:
-            var_mes = 0.0
-
-        # Variação no ano (%): último vs primeiro do ano
-        mask_ano = close.index.year == ano_ult
-        df_ano = close[mask_ano]
-        if not df_ano.empty:
-            close_ini_ano = float(df_ano.iloc[0])
-            var_ano = (ultimo_close / close_ini_ano - 1.0) * 100.0
-        else:
-            var_ano = 0.0
-
-        return ultimo_close, var_dia, var_mes, var_ano
-
+        return serie
     except Exception:
-        # Fallback se o Ipeadata cair / der timeout:
-        # mantém o app de pé com um valor "placeholder".
-        return 128_500.0, 0.0, 0.0, 0.0
+        # Qualquer erro -> não derruba o app, só retorna None
+        return None
+
+def _carregar_ibovespa_curto() -> Tuple[float, float, float, float]:
+    """Resumo do Ibovespa para o bloco de curto prazo (nível, dia, mês, ano).
+
+    Usa SOMENTE a série carregada do CSV local via _obter_serie_ibov.
+    """
+    hoje = date.today()
+    chave_dia = hoje.strftime("%Y-%m-%d")
+
+    serie = _obter_serie_ibov(chave_dia)
+    if serie is None or serie.empty:
+        return 0.0, 0.0, 0.0, 0.0
+
+    serie = serie.dropna()
+    if serie.empty:
+        return 0.0, 0.0, 0.0, 0.0
+
+    ultimo_dia = serie.index.max()
+    nivel_atual = float(serie.loc[ultimo_dia])
+
+    # Variação no dia (vs último fechamento anterior)
+    serie_antes = serie[serie.index < ultimo_dia]
+    if serie_antes.empty:
+        var_dia_pct = 0.0
+    else:
+        nivel_anterior = float(serie_antes.iloc[-1])
+        var_dia_pct = (nivel_atual / nivel_anterior - 1.0) * 100.0
+
+    # Variação no mês
+    serie_mes = serie[
+        (serie.index.year == ultimo_dia.year)
+        & (serie.index.month == ultimo_dia.month)
+    ]
+    if serie_mes.empty:
+        var_mes_pct = 0.0
+    else:
+        nivel_inicio_mes = float(serie_mes.iloc[0])
+        var_mes_pct = (nivel_atual / nivel_inicio_mes - 1.0) * 100.0
+
+    # Variação no ano
+    serie_ano = serie[serie.index.year == ultimo_dia.year]
+    if serie_ano.empty:
+        var_ano_pct = 0.0
+    else:
+        nivel_inicio_ano = float(serie_ano.iloc[0])
+        var_ano_pct = (nivel_atual / nivel_inicio_ano - 1.0) * 100.0
+
+    return nivel_atual, var_dia_pct, var_mes_pct, var_ano_pct
+
 
 def montar_resumo_ibovespa_tabela() -> pd.DataFrame:
     """
@@ -408,47 +446,31 @@ def montar_resumo_ibovespa_tabela() -> pd.DataFrame:
       - "Nível base (pts)"
       - "Nível atual (pts)"
       - "Variação (%)"
+
+    Usa a mesma série do helper _obter_serie_ibov, que por sua vez:
+      - tenta atualizar o CSV via Ipeadata;
+      - lê sempre o histórico local (ibovespa_ipea.carregar_historico_ibovespa);
+      - cacheia por dia para não repetir trabalho.
     """
     try:
-        # Mesma lógica de chamada ao Ipeadata
-        url = f"{IPEA_BASE_URL}/ValoresSerie(SERCODIGO='{IBOV_SERCODIGO}')"
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        payload = resp.json()
-        valores = payload.get("value", [])
+        chave_dia = date.today().strftime("%Y-%m-%d")
+        serie = _obter_serie_ibov(chave_dia)
 
-        if not valores:
-            raise RuntimeError("Ipeadata retornou lista vazia para o Ibovespa.")
+        if serie is None or serie.empty:
+            raise RuntimeError("Série de Ibovespa vazia.")
 
-        # Monta série (data, fechamento)
-        registros = []
-        for item in valores:
-            data_str = item.get("VALDATA")
-            valor = item.get("VALVALOR")
-            if not data_str or valor is None:
-                continue
-            registros.append((data_str[:10], float(valor)))
+        # Garante ordenação crescente por data
+        close = serie.sort_index()
 
-        if not registros:
-            raise RuntimeError(
-                "Não consegui extrair registros válidos de Ibovespa do Ipeadata."
-            )
-
-        df = pd.DataFrame(registros, columns=["data", "fechamento"])
-        df["data"] = pd.to_datetime(df["data"])
-        df = df.sort_values("data").set_index("data")
-
-        close = df["fechamento"]
-
-        # Último fechamento
-        ultimo_close = float(close.iloc[-1])
+        # Nível atual (último fechamento)
+        ultimo_close = _to_float_scalar(close.iloc[-1])
         data_ult = close.index[-1]
 
         # ---------- No ano ----------
         mask_ano = close.index.year == data_ult.year
         serie_ano = close[mask_ano]
         if not serie_ano.empty:
-            base_ano = float(serie_ano.iloc[0])
+            base_ano = _to_float_scalar(serie_ano.iloc[0])
         else:
             base_ano = ultimo_close
         var_ano = (ultimo_close / base_ano - 1.0) * 100.0 if base_ano != 0 else 0.0
@@ -457,7 +479,7 @@ def montar_resumo_ibovespa_tabela() -> pd.DataFrame:
         data_12m = data_ult - relativedelta(years=1)
         serie_12m = close[close.index <= data_12m]
         if not serie_12m.empty:
-            base_12m = float(serie_12m.iloc[-1])
+            base_12m = _to_float_scalar(serie_12m.iloc[-1])
         else:
             base_12m = ultimo_close
         var_12m = (ultimo_close / base_12m - 1.0) * 100.0 if base_12m != 0 else 0.0
@@ -466,7 +488,7 @@ def montar_resumo_ibovespa_tabela() -> pd.DataFrame:
         data_24m = data_ult - relativedelta(years=2)
         serie_24m = close[close.index <= data_24m]
         if not serie_24m.empty:
-            base_24m = float(serie_24m.iloc[-1])
+            base_24m = _to_float_scalar(serie_24m.iloc[-1])
         else:
             base_24m = ultimo_close
         var_24m = (ultimo_close / base_24m - 1.0) * 100.0 if base_24m != 0 else 0.0
@@ -609,6 +631,43 @@ def _delta_di_vs_d1(
     # delta em p.p. (taxa atual - taxa do dia anterior)
     return taxa_atual - taxa_d1
 
+def _delta_di_vs_inicio_ano(
+    df_hist: pd.DataFrame,
+    ticker: Optional[str],
+    taxa_atual: Optional[float],
+) -> Optional[float]:
+    """
+    Calcula o delta em p.p. vs INÍCIO DO ANO (primeiro pregão do ano)
+    para um determinado ticker, usando o histórico di1_historico.csv.
+    """
+    if df_hist is None or df_hist.empty or ticker is None or taxa_atual is None:
+        return None
+
+    df_tk = df_hist[df_hist["ticker"] == ticker].copy()
+    if df_tk.empty:
+        return None
+
+    # garante ordenação por data
+    df_tk = df_tk.sort_values("data")
+
+    # converte para datetime para filtrar por ano
+    df_tk["data_dt"] = pd.to_datetime(df_tk["data"])
+    ano_ref = datetime.today().year
+
+    df_ano = df_tk[df_tk["data_dt"].dt.year == ano_ref]
+    if df_ano.empty:
+        return None
+
+    # primeira taxa do ano para esse ticker
+    taxa_ini_raw = df_ano.sort_values("data_dt")["taxa"].iloc[0]
+    try:
+        taxa_ini = float(taxa_ini_raw)
+    except Exception:
+        return None
+
+    # delta em p.p. (taxa atual - taxa do início do ano)
+    return taxa_atual - taxa_ini
+
 
 def _carregar_di_futuro_2e5_anos() -> Tuple[
     Optional[str],
@@ -732,7 +791,53 @@ def _carregar_di_futuro_2e5_anos() -> Tuple[
         fonte_di5,
     )
 
+def atualizar_cache_curto_prazo() -> None:
+    """
+    Atualiza e salva em CSV as séries SGS usadas no bloco de curto prazo:
+    - Selic Meta (% a.a.)  -> 4 anos de histórico (pra ter 12/24/36/48m)
+    - CDI diário (% a.d.)  -> 2 anos de histórico
+    - PTAX venda (R$/US$)  -> 2 anos de histórico
+    """
+    SGS_DIR.mkdir(parents=True, exist_ok=True)
 
+    hoje = _hoje_str()
+    dois_anos = _dois_anos_atras_str()
+    quatro_anos = _quatro_anos_atras_str()
+
+    # ---------- Selic Meta – 4 anos ----------
+    df_selic = buscar_selic_meta_aa(
+        data_inicial=quatro_anos,
+        data_final=hoje,
+    )
+    if not df_selic.empty:
+        df_selic.to_csv(
+            CAMINHO_SGS_SELIC,
+            index=False,
+            date_format="%Y-%m-%d",
+        )
+
+    # ---------- CDI diário – 2 anos ----------
+    df_cdi = buscar_cdi_diario(
+        data_inicial=dois_anos,
+        data_final=hoje,
+    )
+    if not df_cdi.empty:
+        df_cdi.to_csv(
+            CAMINHO_SGS_CDI,
+            index=False,
+            date_format="%Y-%m-%d",
+        )
+
+    # ---------- PTAX venda – 2 anos ----------
+    # aqui NÃO passamos data_inicial/data_final,
+    # porque a própria função buscar_ptax_venda já cuida disso
+    df_ptax = buscar_ptax_venda()
+    if not df_ptax.empty:
+        df_ptax.to_csv(
+            CAMINHO_SGS_PTAX,
+            index=False,
+            date_format="%Y-%m-%d",
+        )
 
 # =============================================================================
 # FUNÇÃO PRINCIPAL – CARREGA TUDO
@@ -743,9 +848,9 @@ def carregar_dados_curto_prazo_br() -> DadosCurtoPrazoBR:
     """
     Carrega todos os dados usados no bloco 'Indicadores de Curto Prazo – Brasil'.
 
-    Agora:
+     Agora:
       • Selic, CDI e PTAX vêm de dados reais da API do BCB (SGS).
-      • Ibovespa real via yfinance.
+      • Ibovespa via histórico local (CSV do Ipeadata, atualizado automaticamente).
       • DI Futuro 2a / 5a via snapshot B3 (di_futuro_b3).
     """
 
@@ -775,10 +880,15 @@ def carregar_dados_curto_prazo_br() -> DadosCurtoPrazoBR:
     # -------- SELIC META --------
     try:
         # Pega 2 anos para conseguir 12m e 24m
-        df_selic = buscar_selic_meta_aa(
-            data_inicial=_dois_anos_atras_str(),
-            data_final=_hoje_str(),
-        )
+        if CAMINHO_SGS_SELIC.exists():
+            df_selic = pd.read_csv(CAMINHO_SGS_SELIC)
+            df_selic["data"] = pd.to_datetime(df_selic["data"])
+        else:
+            df_selic = buscar_selic_meta_aa(
+                data_inicial=_dois_anos_atras_str(),
+                data_final=_hoje_str(),
+            )
+
         if not df_selic.empty:
             df_selic = df_selic.sort_values("data").reset_index(drop=True)
             selic_meta = float(df_selic["valor"].iloc[-1])
@@ -807,7 +917,12 @@ def carregar_dados_curto_prazo_br() -> DadosCurtoPrazoBR:
 
     # -------- CDI DIÁRIO --------
     try:
-        df_cdi = buscar_cdi_diario()  # por padrão usa ~1 ano
+        if CAMINHO_SGS_CDI.exists():
+            df_cdi = pd.read_csv(CAMINHO_SGS_CDI)
+            df_cdi["data"] = pd.to_datetime(df_cdi["data"])
+        else:
+            df_cdi = buscar_cdi_diario()  # por padrão usa ~1 ano
+
         if not df_cdi.empty:
             df_cdi = df_cdi.sort_values("data").reset_index(drop=True)
             ult = df_cdi.iloc[-1]
@@ -849,7 +964,12 @@ def carregar_dados_curto_prazo_br() -> DadosCurtoPrazoBR:
 
     # -------- PTAX – DÓLAR --------
     try:
-        df_ptax = buscar_ptax_venda()
+        if CAMINHO_SGS_PTAX.exists():
+            df_ptax = pd.read_csv(CAMINHO_SGS_PTAX)
+            df_ptax["data"] = pd.to_datetime(df_ptax["data"])
+        else:
+            df_ptax = buscar_ptax_venda()
+
         if not df_ptax.empty:
             df_ptax = df_ptax.sort_values("data").reset_index(drop=True)
             ult = df_ptax.iloc[-1]
@@ -917,6 +1037,21 @@ def carregar_dados_curto_prazo_br() -> DadosCurtoPrazoBR:
         di_2_taxa = di_2_delta = di_5_taxa = di_5_delta = None
         fonte_di2 = fonte_di5 = "none"
 
+    # NOVO: variação vs início do ano (mesmo ticker / mesmo prazo)
+    di_2_delta_ano = None
+    di_5_delta_ano = None
+    try:
+        df_hist_di = carregar_historico_di_futuro()
+        di_2_delta_ano = _delta_di_vs_inicio_ano(
+            df_hist_di, ticker_di2, di_2_taxa
+        )
+        di_5_delta_ano = _delta_di_vs_inicio_ano(
+            df_hist_di, ticker_di5, di_5_taxa
+        )
+    except Exception:
+        di_2_delta_ano = None
+        di_5_delta_ano = None
+
     # Se tenho a taxa e não tenho variação, mostra seta "flat" (0,00 p.p.)
     if di_2_taxa is not None and di_2_delta is None:
         di_2_delta = 0.0
@@ -942,6 +1077,10 @@ def carregar_dados_curto_prazo_br() -> DadosCurtoPrazoBR:
         di_2_anos_delta=di_2_delta,
         di_5_anos_taxa=di_5_taxa,
         di_5_anos_delta=di_5_delta,
+        # NOVO: variação vs início do ano
+        di_2_anos_delta_ano=di_2_delta_ano,
+        di_5_anos_delta_ano=di_5_delta_ano,
+        # infos auxiliares
         di_2_anos_ticker=ticker_di2,
         di_5_anos_ticker=ticker_di5,
         di_2_anos_fonte_delta=fonte_di2,
@@ -960,3 +1099,9 @@ def carregar_dados_curto_prazo_br_dict() -> Dict[str, Any]:
         "moeda_juros": dados.moeda_juros,
         "ativos_domesticos": dados.ativos_domesticos,
     }
+
+if __name__ == "__main__":
+    print("Atualizando cache de curto prazo (Selic, CDI, PTAX)...")
+    atualizar_cache_curto_prazo()
+    print("Pronto: cache atualizado em data/curto_prazo.")
+

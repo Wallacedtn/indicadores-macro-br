@@ -1,10 +1,21 @@
 # ibovespa_ipea.py
 # -*- coding: utf-8 -*-
 
+from __future__ import annotations
+
 import os
-import requests
-import pandas as pd
 from datetime import datetime
+from pathlib import Path
+from typing import Optional, Tuple
+
+import pandas as pd
+import requests
+import urllib3
+
+# O IPEA está com problema de certificado SSL.
+# Esta linha desativa o aviso de "InsecureRequestWarning"
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 
 # ============================================================
 # CONFIG BÁSICA
@@ -14,43 +25,86 @@ IPEA_BASE_URL = "https://www.ipeadata.gov.br/api/odata4"
 IBOV_SERCODIGO = "GM366_IBVSP366"
 
 # Pasta / arquivo onde vamos salvar o histórico local
-HIST_DIR = "data/ibovespa"
+HIST_DIR = "data/curto_prazo"
 HIST_PATH = os.path.join(HIST_DIR, "ibovespa_ipea.csv")
 
 
-def baixar_serie_ibovespa(timeout: int = 20) -> pd.DataFrame:
+def baixar_serie_ibovespa(
+    timeout: Tuple[int, int] = (5, 60),
+    tentativas: int = 3,
+) -> pd.DataFrame:
     """
-    Baixa a série completa do Ibovespa no Ipeadata.
+    Baixa a série completa do Ibovespa no Ipeadata, com retry.
+
+    - timeout: (tempo de conexão, tempo de leitura), em segundos.
+    - tentativas: quantas vezes tenta antes de desistir.
 
     Retorna um DataFrame com colunas:
         - data (datetime.date)
         - valor (float)
     """
     url = f"{IPEA_BASE_URL}/ValoresSerie(SERCODIGO='{IBOV_SERCODIGO}')"
-    resp = requests.get(url, timeout=timeout)
-    resp.raise_for_status()
-    payload = resp.json()
-    valores = payload.get("value", [])
 
-    if not valores:
-        raise ValueError("Ipeadata retornou lista vazia para o Ibovespa.")
+    ultima_exc: Optional[Exception] = None
 
-    registros = []
-    for item in valores:
-        data_str = item.get("VALDATA")
-        valor = item.get("VALVALOR")
-        if not data_str or valor is None:
-            continue
-        # VALDATA vem no formato 'YYYY-MM-DDT00:00:00'
-        registros.append((data_str[:10], float(valor)))
+    for tentativa in range(1, tentativas + 1):
+        try:
+            print(
+                f"[Ibovespa IPEA] Tentativa {tentativa}/{tentativas} "
+                f"(timeout={timeout})..."
+            )
+            resp = requests.get(url, timeout=timeout, verify=False)
+            resp.raise_for_status()
+            payload = resp.json()
+            valores = payload.get("value", [])
 
-    if not registros:
-        raise ValueError("Não há registros válidos do Ibovespa no Ipeadata.")
+            if not valores:
+                raise ValueError(
+                    "Ipeadata retornou lista vazia para o Ibovespa."
+                )
 
-    df = pd.DataFrame(registros, columns=["data", "valor"])
-    df["data"] = pd.to_datetime(df["data"]).dt.date
-    df = df.sort_values("data").reset_index(drop=True)
-    return df
+            registros = []
+            for item in valores:
+                data_str = item.get("VALDATA")
+                valor = item.get("VALVALOR")
+                if not data_str or valor is None:
+                    continue
+                # VALDATA vem no formato 'YYYY-MM-DDT00:00:00'
+                registros.append((data_str[:10], float(valor)))
+
+            if not registros:
+                raise ValueError(
+                    "Não há registros válidos do Ibovespa no Ipeadata."
+                )
+
+            df = pd.DataFrame(registros, columns=["data", "valor"])
+            df["data"] = pd.to_datetime(df["data"]).dt.date
+            df = df.sort_values("data").reset_index(drop=True)
+            return df
+
+        except (
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+        ) as e:
+            # Erros de timeout / conexão: tenta de novo
+            ultima_exc = e
+            print(
+                f"[Ibovespa IPEA] Falha de rede (tentativa "
+                f"{tentativa}/{tentativas}): {e}"
+            )
+            if tentativa == tentativas:
+                print("[Ibovespa IPEA] Todas as tentativas falharam.")
+                raise
+
+        except requests.exceptions.RequestException as e:
+            # Erros HTTP 4xx/5xx ou outros problemas de request
+            print(f"[Ibovespa IPEA] Erro na requisição: {e}")
+            raise
+
+    # Segurança: se chegar aqui sem retorno
+    if ultima_exc:
+        raise ultima_exc
+    raise RuntimeError("Falha inesperada ao baixar série do Ibovespa.")
 
 
 def atualizar_historico_ibovespa(caminho: str = HIST_PATH) -> pd.DataFrame:

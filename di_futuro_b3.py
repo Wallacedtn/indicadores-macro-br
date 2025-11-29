@@ -13,7 +13,7 @@ from datetime import datetime
 API_B3_DI1 = "https://cotacao.b3.com.br/mds/api/v1/DerivativeQuotation/DI1"
 
 # arquivo onde vamos salvar o histórico
-HIST_DIR = "data/di_futuro"
+HIST_DIR = "data/curvas_tesouro/di_futuro"
 HIST_PATH = os.path.join(HIST_DIR, "di1_historico.csv")
 
 # cabeçalhos para imitar um navegador
@@ -49,9 +49,7 @@ def _get_json(url: str, timeout: int = 30) -> dict:
         resp = requests.get(url, headers=HEADERS, timeout=timeout)
         resp.raise_for_status()
         return resp.json()
-    except RequestException as e:
-        # Log só no console / log do servidor, não aparece para o usuário final.
-        print(f"[di_futuro_b3] Erro ao acessar API B3 ({url}): {e}")
+    except RequestException:
         return {}
 
 
