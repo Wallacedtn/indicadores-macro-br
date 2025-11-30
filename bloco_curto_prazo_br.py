@@ -8,6 +8,7 @@ from dados_curto_prazo_br import (
     carregar_dados_curto_prazo_br,
     montar_resumo_ibovespa_tabela,
 )
+import pandas as pd
 
 
 # =============================================================================
@@ -303,6 +304,10 @@ def metric_card(
 def render_bloco_curto_prazo_br(
     ibov_nivel_atual: Optional[float] = None,
     ibov_var_ano: Optional[float] = None,
+    ipca_mensal: Optional[float] = None,
+    ipca_surpresa_mensal: Optional[float] = None,
+    ipca_focus_mensal: Optional[float] = None,
+    ipca_referencia: Optional[str] = None,
 ) -> None:
 
     """
@@ -582,7 +587,47 @@ background:rgba(10,26,29,0.95);">
             icon_html=ICON_PERCENT,
             subtext=subtext_di5,
         )
-        
+
+    # ======================= INFILAÇÃO – IPCA MENSAL ==========================
+    st.markdown("&nbsp;", unsafe_allow_html=True)
+    st.markdown("### Inflação")
+
+    # card alinhado à esquerda (primeira coluna, mesma largura dos outros cards)
+    col_card, _, _ = st.columns(3)
+
+    # --- Subtexto + badge do IPCA ---
+
+    # Badge: mês de referência (ex.: "10/2025")
+    badge_ipca = ipca_referencia or "mês ref."
+
+    # Subtexto começa vazio
+    subtext_ipca = None
+
+    # Se tivermos Focus mensal, formatamos para texto
+    focus_str = None
+    if ipca_focus_mensal is not None:
+        focus_str = _format_value_br(ipca_focus_mensal, "{:.2f}") + "%"
+
+    # Se tiver IPCA do mês e Focus, mostra:
+    # "Mediana Focus para o mês: X,XX%"
+    if (ipca_mensal is not None) and (focus_str is not None):
+        subtext_ipca = f"Mediana Focus para o mês: {focus_str}"
+
+    # --- Card de IPCA ---
+
+    with col_card:
+        metric_card(
+            "IPCA – variação mensal",
+            ipca_mensal,              # valor principal (IBGE)
+            ipca_surpresa_mensal,     # Δ vs Focus (em p.p.)
+            fmt_value="{:.2f}",
+            value_is_pct=True,        # mostra X,XX%
+            delta_is_pp=True,         # seta: X,XX p.p.
+            badge=badge_ipca,         # ex.: "10/2025"
+            icon_html=ICON_PERCENT,
+            subtext=subtext_ipca,     # "Mediana Focus para o mês: ..."
+        )
+
 
 def render_bloco_curto_prazo() -> None:
     """Alias para compatibilidade com chamadas antigas."""

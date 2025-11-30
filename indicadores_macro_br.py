@@ -1,6 +1,7 @@
 # indicadores_macro_br.py
 # -*- coding: utf-8 -*-
 
+import math
 import streamlit_shadcn_ui as ui
 import altair as alt
 import requests
@@ -128,6 +129,13 @@ FOCUS_TOP5_ANUAIS_URL = (
     "Expectativas/versao/v1/odata/ExpectativasMercadoTop5Anuais"
 )
 
+# Endpoint para expectativas MENSais (IPCA, câmbio, etc.)
+FOCUS_MENSAIS_URL = (
+    "https://olinda.bcb.gov.br/olinda/servico/"
+    "Expectativas/versao/v1/odata/ExpectativaMercadoMensais"
+)
+
+
 # Tolerância para considerar variações "nulas" no Focus (em pontos percentuais)
 FOCUS_DIFF_TOL = 0.01  # 0,01 = 1 basis point
 
@@ -143,6 +151,8 @@ DATA_CURVAS_TESOURO_DIR = DATA_DIR / "curvas_tesouro"
 FOCUS_CACHE_DIR = DATA_EXPECTATIVAS_DIR
 FOCUS_CACHE_FILE = FOCUS_CACHE_DIR / "focus_expectativas_anuais.csv"
 FOCUS_TOP5_CACHE_FILE = FOCUS_CACHE_DIR / "focus_expectativas_top5_anuais.csv"
+FOCUS_MENSAIS_CACHE_FILE = FOCUS_CACHE_DIR / "focus_expectativas_mensais.csv"
+
 
 
 # =============================================================================
@@ -649,6 +659,173 @@ def resumo_inflacao(df: pd.DataFrame) -> Dict[str, float]:
         "mensal": ultimo_valor,
         "acum_ano": acum_ano,
         "acum_12m": acum_12m,
+    }
+
+# =============================================================================
+# FOCUS – EXPECTATIVAS MENSAIS (para surpresa do IPCA mensal)
+# =============================================================================
+
+@lru_cache(maxsize=1)
+def _carregar_focus_mensais_raw() -> pd.DataFrame:
+    """
+    Carrega o dataset de Expectativas de Mercado Mensais do BCB.
+
+    - Se existir CSV em cache e estiver legível, usa o cache.
+    - Caso contrário, baixa da API Olinda e salva um CSV novo.
+    """
+    # 1) Tenta usar o CSV em cache
+    if FOCUS_MENSAIS_CACHE_FILE.exists():
+        try:
+            df_cache = pd.read_csv(FOCUS_MENSAIS_CACHE_FILE)
+
+            if "Data" in df_cache.columns:
+                df_cache["Data"] = pd.to_datetime(
+                    df_cache["Data"], errors="coerce"
+                )
+            if "DataReferencia" in df_cache.columns:
+                df_cache["DataReferencia"] = pd.to_datetime(
+                    df_cache["DataReferencia"], errors="coerce"
+                )
+
+            return df_cache
+        except Exception:
+            # Se der erro ao ler o cache, ignora e baixa de novo
+            pass
+
+    # 2) Baixa da API OLINDA
+    url = (
+        f"{FOCUS_MENSAIS_URL}"
+        "?$format=json"
+        "&$top=50000"
+    )
+
+    try:
+        resp = _get_with_retry(url)
+        dados_json = resp.json()
+        dados = dados_json.get("value", [])
+    except Exception:
+        return pd.DataFrame()
+
+    if not dados:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(dados)
+
+    # Garante colunas de data
+    if "Data" in df.columns:
+        df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
+    else:
+        df["Data"] = pd.NaT
+
+    if "DataReferencia" in df.columns:
+        df["DataReferencia"] = pd.to_datetime(
+            df["DataReferencia"], errors="coerce"
+        )
+    else:
+        df["DataReferencia"] = pd.NaT
+
+    # Normaliza nome do indicador pra facilitar filtro de IPCA
+    df["indicador_norm"] = df["Indicador"].apply(_normalizar_str)
+    if "IndicadorDetalhe" in df.columns:
+        df["detalhe_norm"] = df["IndicadorDetalhe"].fillna("").apply(
+            _normalizar_str
+        )
+    else:
+        df["detalhe_norm"] = ""
+
+    # 3) Salva CSV em cache pra próximas execuções
+    try:
+        FOCUS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        df.to_csv(FOCUS_MENSAIS_CACHE_FILE, index=False)
+    except Exception:
+        # Se não conseguir salvar, só segue com o DF em memória
+        pass
+
+    return df
+
+
+def buscar_focus_ipca_mensal_para_mes(
+    ref_data: pd.Timestamp,
+) -> Optional[float]:
+    """
+    Retorna a mediana MAIS RECENTE do Focus Mensal de IPCA
+    para o mesmo mês/ano de `ref_data`.
+    """
+    if pd.isna(ref_data):
+        return None
+
+    df = _carregar_focus_mensais_raw().copy()
+    if df.empty:
+        return None
+
+    df = df.dropna(subset=["Data", "DataReferencia"])
+    if df.empty:
+        return None
+
+    # Filtra apenas IPCA "cheio"
+    ind_norm = _normalizar_str("IPCA")
+    col_ind = df["indicador_norm"]
+    mask_ind = col_ind == ind_norm
+    if not mask_ind.any():
+        mask_ind = col_ind.str.contains(ind_norm, na=False)
+
+    alvo = ref_data.to_period("M")
+    df["mes_ref"] = df["DataReferencia"].dt.to_period("M")
+
+    df_mes = df[mask_ind & (df["mes_ref"] == alvo)].copy()
+    if df_mes.empty:
+        return None
+
+    df_mes = df_mes.sort_values("Data")
+    med = df_mes.iloc[-1]["Mediana"]
+
+    try:
+        return float(med)
+    except Exception:
+        return None
+
+
+def resumo_ipca_com_focus_mensal() -> Dict[str, Optional[float]]:
+    """
+    Junta:
+      - IPCA mensal / acum ano / acum 12m (IBGE)
+      - Mediana Focus mensal para esse mês
+      - Surpresa: IPCA_real - Focus (em p.p.)
+    """
+    df_ipca = buscar_ipca_ibge()
+    resumo = resumo_inflacao(df_ipca)
+
+    if df_ipca is None or df_ipca.empty:
+        return {
+            "referencia": resumo.get("referencia"),
+            "mensal": resumo.get("mensal"),
+            "acum_ano": resumo.get("acum_ano"),
+            "acum_12m": resumo.get("acum_12m"),
+            "focus_mensal": None,
+            "surpresa_mensal": None,
+        }
+
+    data_ref = df_ipca["data"].max()
+    focus_mensal = buscar_focus_ipca_mensal_para_mes(data_ref)
+
+    ipca_mensal = resumo.get("mensal")
+    surpresa = None
+    if (
+        focus_mensal is not None
+        and not pd.isna(focus_mensal)
+        and ipca_mensal is not None
+        and not pd.isna(ipca_mensal)
+    ):
+        # diferença em pontos percentuais
+        surpresa = ipca_mensal - focus_mensal
+
+    return {
+        "referencia": resumo.get("referencia"),
+        "mensal": ipca_mensal,
+        "acum_ano": resumo.get("acum_ano"),
+        "acum_12m": resumo.get("acum_12m"),
+        "focus_mensal": focus_mensal,
+        "surpresa_mensal": surpresa,
     }
 
 
@@ -2118,9 +2295,46 @@ def render_bloco1_observatorio_mercado(
                     ibov_var_ano = None
 
             # Bloco de cards / visão rápida (já vem com título próprio)
+
+            # ---------- IPCA: resumo p/ card + Focus mensal ----------
+            try:
+                resumo_ipca = resumo_ipca_com_focus_mensal()
+            except Exception:
+                resumo_ipca = {
+                    "referencia": "-",
+                    "mensal": float("nan"),
+                    "acum_ano": float("nan"),
+                    "acum_12m": float("nan"),
+                    "focus_mensal": None,
+                    "surpresa_mensal": None,
+                }
+
+            # pega os valores e troca NaN por None
+            ipca_referencia = resumo_ipca.get("referencia", "-")
+
+            ipca_mensal = resumo_ipca.get("mensal")
+            if isinstance(ipca_mensal, float) and math.isnan(ipca_mensal):
+                ipca_mensal = None
+
+            ipca_acum_ano = resumo_ipca.get("acum_ano")
+            if isinstance(ipca_acum_ano, float) and math.isnan(ipca_acum_ano):
+                ipca_acum_ano = None
+
+            ipca_acum_12m = resumo_ipca.get("acum_12m")
+            if isinstance(ipca_acum_12m, float) and math.isnan(ipca_acum_12m):
+                ipca_acum_12m = None
+
+            ipca_focus_mensal = resumo_ipca.get("focus_mensal")
+            ipca_surpresa_mensal = resumo_ipca.get("surpresa_mensal")
+
+            # Bloco de cards / visão rápida (já vem com título próprio)
             render_bloco_curto_prazo_br(
                 ibov_nivel_atual=ibov_nivel_atual,
                 ibov_var_ano=ibov_var_ano,
+                ipca_mensal=ipca_mensal,
+                ipca_surpresa_mensal=ipca_surpresa_mensal,
+                ipca_focus_mensal=ipca_focus_mensal,
+                ipca_referencia=ipca_referencia,
             )
 
             # Linha separadora opcional
@@ -2147,8 +2361,38 @@ def render_bloco1_observatorio_mercado(
 
             # Bolsa
             st.markdown("**Bolsa – Ibovespa (fechamento)**")
-            st.table(df_ibov_curto.set_index("Indicador"))           
-            
+            st.table(df_ibov_curto.set_index("Indicador"))
+
+            # Inflação
+            st.markdown("**Inflação – IPCA**")
+
+            if ipca_mensal is not None:
+                valor_mensal_str = f"{ipca_mensal:.2f}%"
+                valor_ano_str = (
+                    f"{ipca_acum_ano:.2f}%" if ipca_acum_ano is not None else "-"
+                )
+                valor_12m_str = (
+                    f"{ipca_acum_12m:.2f}%" if ipca_acum_12m is not None else "-"
+                )
+            else:
+                valor_mensal_str = "sem dados"
+                valor_ano_str = "-"
+                valor_12m_str = "-"
+
+            df_ipca_curto = pd.DataFrame(
+                [
+                    {
+                        "Indicador": "IPCA (variação mensal)",
+                        "Data ref.": ipca_referencia or "-",
+                        "Variação mensal": valor_mensal_str,
+                        "Acum. no ano": valor_ano_str,
+                        "Acum. 12 meses": valor_12m_str,
+                        "Fonte": "IBGE / SIDRA (Tabela 1737)",
+                    }
+                ]
+            )
+            st.table(df_ipca_curto.set_index("Indicador"))
+
 
         # -------- Curvas & Tesouro BR --------
         with subtab_curvas_tesouro:

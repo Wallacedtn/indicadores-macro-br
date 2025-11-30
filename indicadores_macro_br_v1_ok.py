@@ -1,6 +1,7 @@
 # indicadores_macro_br.py
 # -*- coding: utf-8 -*-
 
+import math
 import streamlit_shadcn_ui as ui
 import altair as alt
 import requests
@@ -128,6 +129,32 @@ FOCUS_TOP5_ANUAIS_URL = (
     "Expectativas/versao/v1/odata/ExpectativasMercadoTop5Anuais"
 )
 
+# Endpoint para expectativas MENSais (IPCA, câmbio, etc.)
+FOCUS_MENSAIS_URL = (
+    "https://olinda.bcb.gov.br/olinda/servico/"
+    "Expectativas/versao/v1/odata/ExpectativaMercadoMensais"
+)
+
+
+# Tolerância para considerar variações "nulas" no Focus (em pontos percentuais)
+FOCUS_DIFF_TOL = 0.01  # 0,01 = 1 basis point
+
+# Diretórios principais de dados (iguais às 3 seções do site)
+BASE_DIR = Path(__file__).parent
+DATA_DIR = BASE_DIR / "data"
+
+DATA_CURTO_PRAZO_DIR = DATA_DIR / "curto_prazo"
+DATA_EXPECTATIVAS_DIR = DATA_DIR / "expectativas"
+DATA_CURVAS_TESOURO_DIR = DATA_DIR / "curvas_tesouro"
+
+# Arquivos de cache do Focus (ficam em data/expectativas/)
+FOCUS_CACHE_DIR = DATA_EXPECTATIVAS_DIR
+FOCUS_CACHE_FILE = FOCUS_CACHE_DIR / "focus_expectativas_anuais.csv"
+FOCUS_TOP5_CACHE_FILE = FOCUS_CACHE_DIR / "focus_expectativas_top5_anuais.csv"
+FOCUS_MENSAIS_CACHE_FILE = FOCUS_CACHE_DIR / "focus_expectativas_mensais.csv"
+
+
+
 # =============================================================================
 # FUNÇÕES AUXILIARES DE DATA
 # =============================================================================
@@ -234,7 +261,34 @@ def buscar_serie_sgs(
 
 
 def buscar_selic_meta_aa() -> pd.DataFrame:
-    """Meta Selic (% a.a.). Últimos 4 anos de dados."""
+    """
+    Meta Selic (% a.a.).
+
+    Versão offline-first para o SITE:
+    - Se existir o arquivo data/curto_prazo/selic_meta_aa.csv, usa esse CSV;
+    - Se não existir ou estiver ruim, cai para a API SGS (como era antes).
+    """
+    # Caminho do CSV de Selic que o dados_curto_prazo_br.py salva
+    base_dir = Path(__file__).parent
+    caminho_csv = base_dir / "data" / "curto_prazo" / "selic_meta_aa.csv"
+
+    # 1) Tentar usar o CSV local (modo offline)
+    if caminho_csv.exists():
+        try:
+            df = pd.read_csv(caminho_csv)
+
+            # Garante que a coluna de data está em datetime
+            if "data" in df.columns:
+                df["data"] = pd.to_datetime(df["data"], errors="coerce")
+
+            # Opcional: ordena por data, só pra garantir
+            df = df.sort_values("data").reset_index(drop=True)
+            return df
+        except Exception:
+            # Se der problema para ler o CSV, cai pro modo online
+            pass
+
+    # 2) Fallback: busca na API SGS (comportamento antigo)
     return buscar_serie_sgs(
         SGS_SERIES["selic_meta_aa"],
         data_inicial=_quatro_anos_atras_str(),
@@ -607,6 +661,173 @@ def resumo_inflacao(df: pd.DataFrame) -> Dict[str, float]:
         "acum_12m": acum_12m,
     }
 
+# =============================================================================
+# FOCUS – EXPECTATIVAS MENSAIS (para surpresa do IPCA mensal)
+# =============================================================================
+
+@lru_cache(maxsize=1)
+def _carregar_focus_mensais_raw() -> pd.DataFrame:
+    """
+    Carrega o dataset de Expectativas de Mercado Mensais do BCB.
+
+    - Se existir CSV em cache e estiver legível, usa o cache.
+    - Caso contrário, baixa da API Olinda e salva um CSV novo.
+    """
+    # 1) Tenta usar o CSV em cache
+    if FOCUS_MENSAIS_CACHE_FILE.exists():
+        try:
+            df_cache = pd.read_csv(FOCUS_MENSAIS_CACHE_FILE)
+
+            if "Data" in df_cache.columns:
+                df_cache["Data"] = pd.to_datetime(
+                    df_cache["Data"], errors="coerce"
+                )
+            if "DataReferencia" in df_cache.columns:
+                df_cache["DataReferencia"] = pd.to_datetime(
+                    df_cache["DataReferencia"], errors="coerce"
+                )
+
+            return df_cache
+        except Exception:
+            # Se der erro ao ler o cache, ignora e baixa de novo
+            pass
+
+    # 2) Baixa da API OLINDA
+    url = (
+        f"{FOCUS_MENSAIS_URL}"
+        "?$format=json"
+        "&$top=50000"
+    )
+
+    try:
+        resp = _get_with_retry(url)
+        dados_json = resp.json()
+        dados = dados_json.get("value", [])
+    except Exception:
+        return pd.DataFrame()
+
+    if not dados:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(dados)
+
+    # Garante colunas de data
+    if "Data" in df.columns:
+        df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
+    else:
+        df["Data"] = pd.NaT
+
+    if "DataReferencia" in df.columns:
+        df["DataReferencia"] = pd.to_datetime(
+            df["DataReferencia"], errors="coerce"
+        )
+    else:
+        df["DataReferencia"] = pd.NaT
+
+    # Normaliza nome do indicador pra facilitar filtro de IPCA
+    df["indicador_norm"] = df["Indicador"].apply(_normalizar_str)
+    if "IndicadorDetalhe" in df.columns:
+        df["detalhe_norm"] = df["IndicadorDetalhe"].fillna("").apply(
+            _normalizar_str
+        )
+    else:
+        df["detalhe_norm"] = ""
+
+    # 3) Salva CSV em cache pra próximas execuções
+    try:
+        FOCUS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        df.to_csv(FOCUS_MENSAIS_CACHE_FILE, index=False)
+    except Exception:
+        # Se não conseguir salvar, só segue com o DF em memória
+        pass
+
+    return df
+
+
+def buscar_focus_ipca_mensal_para_mes(
+    ref_data: pd.Timestamp,
+) -> Optional[float]:
+    """
+    Retorna a mediana MAIS RECENTE do Focus Mensal de IPCA
+    para o mesmo mês/ano de `ref_data`.
+    """
+    if pd.isna(ref_data):
+        return None
+
+    df = _carregar_focus_mensais_raw().copy()
+    if df.empty:
+        return None
+
+    df = df.dropna(subset=["Data", "DataReferencia"])
+    if df.empty:
+        return None
+
+    # Filtra apenas IPCA "cheio"
+    ind_norm = _normalizar_str("IPCA")
+    col_ind = df["indicador_norm"]
+    mask_ind = col_ind == ind_norm
+    if not mask_ind.any():
+        mask_ind = col_ind.str.contains(ind_norm, na=False)
+
+    alvo = ref_data.to_period("M")
+    df["mes_ref"] = df["DataReferencia"].dt.to_period("M")
+
+    df_mes = df[mask_ind & (df["mes_ref"] == alvo)].copy()
+    if df_mes.empty:
+        return None
+
+    df_mes = df_mes.sort_values("Data")
+    med = df_mes.iloc[-1]["Mediana"]
+
+    try:
+        return float(med)
+    except Exception:
+        return None
+
+
+def resumo_ipca_com_focus_mensal() -> Dict[str, Optional[float]]:
+    """
+    Junta:
+      - IPCA mensal / acum ano / acum 12m (IBGE)
+      - Mediana Focus mensal para esse mês
+      - Surpresa: IPCA_real - Focus (em p.p.)
+    """
+    df_ipca = buscar_ipca_ibge()
+    resumo = resumo_inflacao(df_ipca)
+
+    if df_ipca is None or df_ipca.empty:
+        return {
+            "referencia": resumo.get("referencia"),
+            "mensal": resumo.get("mensal"),
+            "acum_ano": resumo.get("acum_ano"),
+            "acum_12m": resumo.get("acum_12m"),
+            "focus_mensal": None,
+            "surpresa_mensal": None,
+        }
+
+    data_ref = df_ipca["data"].max()
+    focus_mensal = buscar_focus_ipca_mensal_para_mes(data_ref)
+
+    ipca_mensal = resumo.get("mensal")
+    surpresa = None
+    if (
+        focus_mensal is not None
+        and not pd.isna(focus_mensal)
+        and ipca_mensal is not None
+        and not pd.isna(ipca_mensal)
+    ):
+        # diferença em pontos percentuais
+        surpresa = ipca_mensal - focus_mensal
+
+    return {
+        "referencia": resumo.get("referencia"),
+        "mensal": ipca_mensal,
+        "acum_ano": resumo.get("acum_ano"),
+        "acum_12m": resumo.get("acum_12m"),
+        "focus_mensal": focus_mensal,
+        "surpresa_mensal": surpresa,
+    }
+
 
 # =============================================================================
 # CÂMBIO – RESUMO (níveis + variações)
@@ -715,19 +936,30 @@ def _normalizar_str(s: str) -> str:
     return s.lower()
 
 
-@lru_cache(maxsize=1)
+
 def _carregar_focus_raw() -> pd.DataFrame:
     """
-    Carrega o dataset de Expectativas de Mercado Anuais (estatísticas)
-    e prepara um DataFrame com:
+    Carrega o dataset de Expectativas de Mercado Anuais (estatísticas).
 
-      - Indicador
-      - IndicadorDetalhe
-      - Data           (quando a expectativa foi registrada)
-      - DataReferencia (ano de referência, ex: 2025)
-      - ano_ref        (int)
-      - Mediana        (float)
+    Primeiro tenta ler de um CSV local em cache
+    (data/expectativas/focus_expectativas_anuais.csv).
+    Se o arquivo não existir ou estiver ruim, baixa da API do BCB,
+    processa e salva o CSV para usos futuros.
     """
+    # 1) tentar ler do cache local (modo "offline")
+    if FOCUS_CACHE_FILE.exists():
+        try:
+            df_cache = pd.read_csv(FOCUS_CACHE_FILE)
+            if "Data" in df_cache.columns:
+                df_cache["Data"] = pd.to_datetime(
+                    df_cache["Data"], errors="coerce"
+                )
+            return df_cache
+        except Exception:
+            # se o CSV estiver corrompido, ignora e baixa de novo
+            pass
+
+    # 2) se não tiver cache, baixa da API
     url = (
         f"{FOCUS_BASE_URL}"
         "?$top=50000"
@@ -759,6 +991,14 @@ def _carregar_focus_raw() -> pd.DataFrame:
     else:
         df["detalhe_norm"] = ""
 
+    # 3) salvar no cache para os próximos runs ficarem rápidos/offline
+    try:
+        FOCUS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        df.to_csv(FOCUS_CACHE_FILE, index=False)
+    except Exception:
+        # erro ao salvar cache não deve quebrar o app
+        pass
+
     return df
 
 
@@ -766,7 +1006,24 @@ def _carregar_focus_raw() -> pd.DataFrame:
 def _carregar_focus_top5_raw() -> pd.DataFrame:
     """
     Carrega o dataset de Expectativas Anuais Top5.
+
+    Primeiro tenta ler de um CSV local em cache
+    (data/expectativas/focus_expectativas_top5_anuais.csv).
+    Se não existir, baixa da API, processa e salva.
     """
+    # 1) tentar usar cache local
+    if FOCUS_TOP5_CACHE_FILE.exists():
+        try:
+            df_cache = pd.read_csv(FOCUS_TOP5_CACHE_FILE)
+            if "Data" in df_cache.columns:
+                df_cache["Data"] = pd.to_datetime(
+                    df_cache["Data"], errors="coerce"
+                )
+            return df_cache
+        except Exception:
+            pass
+
+    # 2) baixa da API se não tiver cache
     url = (
         f"{FOCUS_TOP5_ANUAIS_URL}"
         "?$top=50000"
@@ -795,7 +1052,7 @@ def _carregar_focus_top5_raw() -> pd.DataFrame:
     # nome do indicador normalizado (IPCA, PIB, Balança comercial, etc.)
     df["indicador_norm"] = df["Indicador"].apply(_normalizar_str)
 
-    # aqui agora usamos o IndicadorDetalhe (Saldo, Exportações, Importações, etc.)
+    # se um dia tiver IndicadorDetalhe aqui também, tratamos igual ao outro
     if "IndicadorDetalhe" in df.columns:
         df["detalhe_norm"] = (
             df["IndicadorDetalhe"]
@@ -803,8 +1060,14 @@ def _carregar_focus_top5_raw() -> pd.DataFrame:
             .apply(_normalizar_str)
         )
     else:
-        # fallback defensivo (não é o caso desse endpoint, mas deixa robusto)
         df["detalhe_norm"] = ""
+
+    # 3) salvar no cache local
+    try:
+        FOCUS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        df.to_csv(FOCUS_TOP5_CACHE_FILE, index=False)
+    except Exception:
+        pass
 
     return df
 
@@ -879,123 +1142,108 @@ def _resumo_semanal_expectativa_anual(
     detalhe_substr: Optional[str] = None,
 ) -> Dict[str, Optional[float]]:
     """
-    Calcula um resumo semanal para a mediana do Focus de um indicador/ano:
+    Calcula um resumo semanal para a mediana do Focus de um indicador/ano,
+    copiando a metodologia do PDF:
 
-      - hoje:     valor da ÚLTIMA semana (semana que contém a última data)
-      - semana_4: valor de 4 semanas atrás (4 semanas Focus)
-      - comp:     seta + nº de semanas desde o último movimento de alta/baixa
-                  (ex.: "▲ (3)", "▼ (1)", "= (2)").
-
-    A semana Focus é definida como período "W-FRI" (sábado a sexta).
-    Dentro de cada semana, usamos o ÚLTIMO valor disponível:
-
-      - se sexta não for feriado → usamos sexta
-      - se sexta for feriado → usamos o último dia útil da semana
-        (quinta, quarta, etc.)
-
-    Para o comportamento semanal ("comp"), seguimos a lógica usada no
-    relatório Focus do BC:
-
-      1) Arredondamos a mediana em 2 casas decimais;
-      2) Calculamos os deltas semana a semana;
-      3) Procuramos, de trás pra frente, o ÚLTIMO delta diferente de zero;
-      4) A seta é o sinal desse delta;
-      5) O número entre parênteses é quantas semanas se passaram desde esse
-         movimento até a semana atual (incluindo semanas estáveis).
+    - "hoje":     última mediana (arredondada em 2 casas)
+    - "semana_4": valor de 4 semanas atrás
+    - "comp":     texto '▲ (3)', '▼ (1)', '= (2)', etc.
     """
-
     df = _carregar_focus_raw().copy()
     if df.empty:
         return {}
 
-    # 1) filtro pelo ano de referência
+    # 1) filtra pelo ano
     mask = df["ano_ref"] == ano_desejado
 
-    # 2) filtro pelo indicador (IPCA, PIB, Selic, câmbio, etc.)
+    # 2) filtra pelo indicador (IPCA, PIB, Selic, câmbio...)
     ind_norm = _normalizar_str(indicador_substr)
     col_ind = df["indicador_norm"]
-
     mask_ind = col_ind == ind_norm
     if not mask_ind.any():
         mask_ind = col_ind.str.contains(ind_norm, na=False)
-
     mask &= mask_ind
 
-    # 3) filtro por detalhe (Saldo da balança, Administrados, etc.)
+    # 3) filtra pelo detalhe, se houver (ex.: "Top 5", etc.)
     if detalhe_substr:
         det_norm = _normalizar_str(detalhe_substr)
         col_det = df["detalhe_norm"]
-
         mask_det = col_det == det_norm
         if not mask_det.any():
             mask_det = col_det.str.contains(det_norm, na=False)
-
         mask &= mask_det
 
     df_f = df[mask].copy()
     if df_f.empty:
         return {}
 
-    # 4) garantir datas válidas
+    # 4) datas válidas
     df_f["Data"] = pd.to_datetime(df_f["Data"], errors="coerce")
     df_f = df_f.dropna(subset=["Data"])
     if df_f.empty:
         return {}
 
-    # 5) definir a semana Focus: termina na sexta (W-FRI)
+    # 5) semana Focus = semana que termina na sexta (W-FRI)
     df_f["semana_focus"] = df_f["Data"].dt.to_period("W-FRI")
 
-    # Dentro de cada semana, pegamos o ÚLTIMO valor (mais próximo da sexta)
+    # 6) dentro de cada semana, pega o ÚLTIMO valor
     df_sem = (
         df_f.sort_values("Data")
         .groupby("semana_focus", as_index=False)
         .last()
     )
-
     if df_sem.empty:
         return {}
 
-    # --- níveis (usamos o valor cheio, como vem da API) ---
-    valores_raw = df_sem["Mediana"].astype(float).tolist()
-    n = len(valores_raw)
+    # 7) valores e diferença na MESMA base do PDF (2 casas decimais)
+    df_sem["Mediana_float"] = df_sem["Mediana"].astype(float)
+    df_sem["Mediana_round"] = df_sem["Mediana_float"].round(2)
+    df_sem["Diff_vs_ant"] = df_sem["Mediana_round"].diff()
+
+    def _classificar_mov(diff: float) -> str:
+        """Replica a lógica do Focus:
+        - diff > 0  => ▲
+        - diff < 0  => ▼
+        - diff == 0 => =
+        """
+        if pd.isna(diff):
+            return "="
+        if diff > 0:
+            return "▲"
+        if diff < 0:
+            return "▼"
+        return "="
+
+    df_sem["Seta"] = df_sem["Diff_vs_ant"].apply(_classificar_mov)
+
+    # 8) calcula o streak (quantas semanas seguidas nesse comportamento)
+    setas = df_sem["Seta"].tolist()
+    streaks = []
+    ultimo = None
+    cont = 0
+    for s in setas:
+        if s == ultimo:
+            cont += 1
+        else:
+            ultimo = s
+            cont = 1
+        streaks.append(cont)
+
+    df_sem["Streak"] = streaks
+
+    n = len(df_sem)
     if n == 0:
         return {}
 
-    val_hoje = valores_raw[-1]
-    val_4 = valores_raw[-5] if n >= 5 else None  # 4 semanas atrás
+    valores = df_sem["Mediana_round"].tolist()
+    val_hoje = valores[-1]
+    val_4 = valores[-5] if n >= 5 else None
 
-    # --- comportamento semanal (setas) ---
-    # Se só tem uma semana, não há histórico para comparar
-    if n == 1:
-        comp_txt = "-"
-    else:
-        # usamos a mediana arredondada em 2 casas, como o BC
-        valores = [round(v, 2) for v in valores_raw]
-
-        # deltas semana a semana
-        diffs = [valores[i] - valores[i - 1] for i in range(1, n)]
-        eps = 1e-9
-
-        # 1) procuramos, de trás pra frente, o ÚLTIMO delta diferente de zero
-        last_nonzero_idx = None  # índice (1-based) da semana do último movimento
-        last_nonzero_delta = None
-
-        for idx in range(len(diffs) - 1, -1, -1):
-            d = diffs[idx]
-            if abs(d) > eps:
-                last_nonzero_idx = idx + 1  # diffs[0] = 2ª semana
-                last_nonzero_delta = d
-                break
-
-        if last_nonzero_idx is None:
-            # série toda estável → "=" + nº de semanas estáveis
-            repeticoes = len(diffs)
-            comp_txt = f"= ({repeticoes})" if repeticoes > 0 else "-"
-        else:
-            seta = "▲" if last_nonzero_delta > 0 else "▼"
-            # nº de semanas desde esse movimento até a semana atual
-            repeticoes = n - last_nonzero_idx
-            comp_txt = f"{seta} ({repeticoes})" if repeticoes > 0 else seta
+    comp_txt = "-"
+    if n >= 2:
+        seta_hoje = df_sem["Seta"].iloc[-1]
+        streak_hoje = int(df_sem["Streak"].iloc[-1])
+        comp_txt = f"{seta_hoje} ({streak_hoje})"
 
     return {
         "hoje": val_hoje,
@@ -1308,7 +1556,7 @@ def montar_tabela_selic_meta() -> pd.DataFrame:
         linhas.append(
             {
                 "Indicador": "Selic Meta",
-                "Data": data_ult.strftime("%d/%m/%Y"),
+                "Data ref.": data_ult.strftime("%d/%m/%Y"),
                 "Nível atual": _fmt(nivel_atual),
                 "Início do ano": _fmt(inicio_ano_val),
                 "Há 12 meses": _fmt(nivel_12m),
@@ -1323,7 +1571,7 @@ def montar_tabela_selic_meta() -> pd.DataFrame:
         linhas.append(
             {
                 "Indicador": "Selic Meta",
-                "Data": "-",
+                "Data ref.": "-",
                 "Nível atual": f"Erro: {e}",
                 "Início do ano": "-",
                 "Há 12 meses": "-",
@@ -1339,7 +1587,7 @@ def montar_tabela_selic_meta() -> pd.DataFrame:
     df_out = df_out[
         [
             "Indicador",
-            "Data",
+            "Data ref.",
             "Nível atual",
             "Início do ano",
             "Há 12 meses",
@@ -1440,6 +1688,13 @@ def montar_tabela_cdi() -> pd.DataFrame:
 
 
 def montar_tabela_ptax() -> pd.DataFrame:
+    """
+    Monta a tabela de câmbio – Dólar PTAX (venda) para o bloco de curto prazo.
+
+    - Usa buscar_ptax_venda() (que já está offline-first via CSV).
+    - Mostra "Data ref." (última data usada).
+    - Nível há 12m / 24m vêm só com valor, sem data entre parênteses.
+    """
     linhas: List[Dict[str, str]] = []
 
     try:
@@ -1447,27 +1702,24 @@ def montar_tabela_ptax() -> pd.DataFrame:
         r = resumo_cambio(df)
 
         if r["ultimo"] is not None:
+            # Data de referência (última observação)
             ultima_data_str = r["ultima_data"].strftime("%d/%m/%Y")
             nivel_atual = f"R$ {r['ultimo']:.4f}"
 
-            if r["valor_12m"] is not None and r["data_12m"] is not None:
-                nivel_12m = (
-                    f"R$ {r['valor_12m']:.4f} "
-                    f"({r['data_12m'].strftime('%d/%m/%Y')})"
-                )
+            # Níveis de 12m e 24m: só valor
+            if r["valor_12m"] is not None:
+                nivel_12m = f"R$ {r['valor_12m']:.4f}"
             else:
                 nivel_12m = "-"
 
-            if r["valor_24m"] is not None and r["data_24m"] is not None:
-                nivel_24m = (
-                    f"R$ {r['valor_24m']:.4f} "
-                    f"({r['data_24m'].strftime('%d/%m/%Y')})"
-                )
+            if r["valor_24m"] is not None:
+                nivel_24m = f"R$ {r['valor_24m']:.4f}"
             else:
                 nivel_24m = "-"
 
-            var_ano = f"{r['var_ano']:+.2f}%" if r["var_ano"] is not None else "-"
+            # Variações
             var_mes = f"{r['var_mes']:+.2f}%" if r["var_mes"] is not None else "-"
+            var_ano = f"{r['var_ano']:+.2f}%" if r["var_ano"] is not None else "-"
             var_12m = f"{r['var_12m']:+.2f}%" if r["var_12m"] is not None else "-"
             var_24m = f"{r['var_24m']:+.2f}%" if r["var_24m"] is not None else "-"
         else:
@@ -1475,16 +1727,15 @@ def montar_tabela_ptax() -> pd.DataFrame:
             nivel_atual = "sem dados"
             nivel_12m = "-"
             nivel_24m = "-"
-            var_ano = "-"
             var_mes = "-"
+            var_ano = "-"
             var_12m = "-"
             var_24m = "-"
 
-        # 👉 Aqui a ordem das colunas já vem com Var. mês antes de Var. ano
         linhas.append(
             {
                 "Indicador": "Dólar PTAX - venda",
-                "Data": ultima_data_str,
+                "Data ref.": ultima_data_str,
                 "Nível atual": nivel_atual,
                 "Nível há 12m": nivel_12m,
                 "Nível há 24m": nivel_24m,
@@ -1492,7 +1743,7 @@ def montar_tabela_ptax() -> pd.DataFrame:
                 "Var. ano": var_ano,
                 "Var. 12m": var_12m,
                 "Var. 24m": var_24m,
-                "Fonte": f"BCB / SGS ({SGS_SERIES['ptax_venda']})",
+                "Fonte": "BCB / SGS (10813)",
             }
         )
 
@@ -1500,7 +1751,7 @@ def montar_tabela_ptax() -> pd.DataFrame:
         linhas.append(
             {
                 "Indicador": "Dólar PTAX - venda",
-                "Data": "-",
+                "Data ref.": "-",
                 "Nível atual": f"Erro: {e}",
                 "Nível há 12m": "-",
                 "Nível há 24m": "-",
@@ -1508,19 +1759,18 @@ def montar_tabela_ptax() -> pd.DataFrame:
                 "Var. ano": "-",
                 "Var. 12m": "-",
                 "Var. 24m": "-",
-                "Fonte": "BCB / SGS",
+                "Fonte": "BCB / SGS (10813)",
             }
         )
 
-    # 🔽 força a ordem das colunas na tabela
     df = pd.DataFrame(linhas)
     ordem_colunas = [
         "Indicador",
-        "Data",
+        "Data ref.",
         "Nível atual",
         "Nível há 12m",
         "Nível há 24m",
-        "Var. mês",   # primeiro
+        "Var. mês",
         "Var. ano",
         "Var. 12m",
         "Var. 24m",
@@ -1540,22 +1790,18 @@ def _format_br_number(valor: float | None, casas: int = 2) -> str:
     s = f"{valor:,.{casas}f}"
     return s.replace(",", "X").replace(".", ",").replace("X", ".")
 
-@st.cache_data(ttl=86400)  # cache por até 1 dia (24h)
-def obter_historico_ibovespa_inteligente(chave_dia: str) -> pd.DataFrame:
+def obter_historico_ibovespa_inteligente() -> pd.DataFrame:
     """
-    Atualiza o histórico do Ibovespa a partir do Ipeadata.
+    Para o SITE:
 
-    IMPORTANTE (comportamento):
-    - A função é cacheada por dia (usando 'chave_dia' como parte da chave).
-    - Se a atualização ONLINE der certo uma vez no dia,
-      as próximas chamadas no MESMO dia reaproveitam o mesmo DataFrame
-      (não chamam o Ipeadata de novo).
-    - Se a chamada der erro (timeout, etc.), nenhuma atualização é cacheada
-      e as próximas execuções podem tentar novamente no mesmo dia.
+    - Usa SOMENTE o histórico local salvo em CSV.
+    - Quem atualiza esse CSV é o script ibovespa_ipea.py,
+      rodando 1x por dia (por exemplo, de madrugada).
+
+    Assim, o app fica leve e não depende do humor do Ipeadata.
     """
-    # Aqui chamamos a função que fala com o Ipeadata e atualiza o CSV.
-    # Se der erro, a exceção sobe para quem chamou (montar_tabela_ibovespa).
-    return atualizar_historico_ibovespa()
+    return carregar_historico_ibovespa()
+
 
 
 def montar_tabela_ibovespa() -> pd.DataFrame:
@@ -1573,13 +1819,11 @@ def montar_tabela_ibovespa() -> pd.DataFrame:
     try:
         origem_dados = "online"
 
-        # chave por dia: garante, junto com o cache, no máximo 1 atualização
-        # bem-sucedida por dia a partir do Ipeadata
-        chave_dia = date.today().strftime("%Y-%m-%d")
-
         try:
-            # 1) Tenta atualizar histórico (API Ipeadata) de forma cacheada por dia
-            df_hist = obter_historico_ibovespa_inteligente(chave_dia)
+            # 1) Tenta atualizar histórico (API Ipeadata) sempre que o app roda
+            #    (sem cache diário).
+            df_hist = obter_historico_ibovespa_inteligente()
+
         except Exception as e_online:
             # 2) Se falhar (timeout, erro de rede, etc.), tenta usar apenas o CSV já salvo
             try:
@@ -1657,15 +1901,12 @@ def montar_tabela_ibovespa() -> pd.DataFrame:
         var_12m = f"{var_12m_val:+.2f}%" if var_12m_val is not None else "-"
         var_24m = f"{var_24m_val:+.2f}%" if var_24m_val is not None else "-"
 
-        if origem_dados == "online":
-            fonte = "Ipeadata (GM366_IBVSP366)"
-        else:
-            fonte = "Ipeadata (GM366_IBVSP366) – base local"
+        fonte = "Ipeadata (GM366_IBVSP366)"
 
         linhas.append(
             {
                 "Indicador": "Ibovespa - fechamento",
-                "Data": data_str,
+                "Data ref.": data_str,
                 "Nível atual": nivel_atual,
                 "Nível há 12m": nivel_12m,
                 "Nível há 24m": nivel_24m,
@@ -1681,7 +1922,7 @@ def montar_tabela_ibovespa() -> pd.DataFrame:
         linhas.append(
             {
                 "Indicador": "Ibovespa - fechamento",
-                "Data": "-",
+                "Data ref.": "-",
                 "Nível atual": "Indisponível (falha ao obter dados)",
                 "Nível há 12m": "-",
                 "Nível há 24m": "-",
@@ -1697,7 +1938,7 @@ def montar_tabela_ibovespa() -> pd.DataFrame:
     df_saida = pd.DataFrame(linhas)
     ordem_colunas = [
         "Indicador",
-        "Data",
+        "Data ref.",
         "Nível atual",
         "Nível há 12m",
         "Nível há 24m",
@@ -2028,8 +2269,73 @@ def render_bloco1_observatorio_mercado(
 
         # -------- Indicadores BR --------
         with subtab_indic_br:
+            # ---------- Ibovespa: dados para o card ----------
+            ibov_nivel_atual = None
+            ibov_var_ano = None
+
+            if df_ibov_curto is not None and not df_ibov_curto.empty:
+                linha_ibov = df_ibov_curto.iloc[0]
+
+                # Ex.: "155.278,00 pts" -> 155278.00
+                nivel_str = str(linha_ibov.get("Nível atual", ""))
+                try:
+                    # tira o " pts" e converte de BR para float Python
+                    nivel_str = nivel_str.split(" ")[0]
+                    nivel_str = nivel_str.replace(".", "").replace(",", ".")
+                    ibov_nivel_atual = float(nivel_str)
+                except Exception:
+                    ibov_nivel_atual = None
+
+                # Ex.: "+29,26%" -> 29.26
+                var_ano_str = str(linha_ibov.get("Var. ano", ""))
+                try:
+                    var_ano_str = var_ano_str.replace("%", "").replace(",", ".")
+                    ibov_var_ano = float(var_ano_str)
+                except Exception:
+                    ibov_var_ano = None
+
             # Bloco de cards / visão rápida (já vem com título próprio)
-            render_bloco_curto_prazo_br()
+
+            # ---------- IPCA: resumo p/ card + Focus mensal ----------
+            try:
+                resumo_ipca = resumo_ipca_com_focus_mensal()
+            except Exception:
+                resumo_ipca = {
+                    "referencia": "-",
+                    "mensal": float("nan"),
+                    "acum_ano": float("nan"),
+                    "acum_12m": float("nan"),
+                    "focus_mensal": None,
+                    "surpresa_mensal": None,
+                }
+
+            # pega os valores e troca NaN por None
+            ipca_referencia = resumo_ipca.get("referencia", "-")
+
+            ipca_mensal = resumo_ipca.get("mensal")
+            if isinstance(ipca_mensal, float) and math.isnan(ipca_mensal):
+                ipca_mensal = None
+
+            ipca_acum_ano = resumo_ipca.get("acum_ano")
+            if isinstance(ipca_acum_ano, float) and math.isnan(ipca_acum_ano):
+                ipca_acum_ano = None
+
+            ipca_acum_12m = resumo_ipca.get("acum_12m")
+            if isinstance(ipca_acum_12m, float) and math.isnan(ipca_acum_12m):
+                ipca_acum_12m = None
+
+            ipca_focus_mensal = resumo_ipca.get("focus_mensal")
+            ipca_surpresa_mensal = resumo_ipca.get("surpresa_mensal")
+
+            # Bloco de cards / visão rápida (já vem com título próprio)
+            render_bloco_curto_prazo_br(
+                ibov_nivel_atual=ibov_nivel_atual,
+                ibov_var_ano=ibov_var_ano,
+                ipca_mensal=ipca_mensal,
+                ipca_surpresa_mensal=ipca_surpresa_mensal,
+                ipca_focus_mensal=ipca_focus_mensal,
+                ipca_referencia=ipca_referencia,
+            )
 
             # Linha separadora opcional
             st.markdown("---")
@@ -2040,7 +2346,6 @@ def render_bloco1_observatorio_mercado(
                 "Quadros detalhados com Selic meta, CDI acumulado, câmbio PTAX e "
                 "Ibovespa, complementando os cards acima."
             )
-
 
             # Selic
             st.markdown("**Taxa básica – Selic Meta**")
@@ -2056,8 +2361,38 @@ def render_bloco1_observatorio_mercado(
 
             # Bolsa
             st.markdown("**Bolsa – Ibovespa (fechamento)**")
-            st.table(df_ibov_curto.set_index("Indicador"))           
-            
+            st.table(df_ibov_curto.set_index("Indicador"))
+
+            # Inflação
+            st.markdown("**Inflação – IPCA**")
+
+            if ipca_mensal is not None:
+                valor_mensal_str = f"{ipca_mensal:.2f}%"
+                valor_ano_str = (
+                    f"{ipca_acum_ano:.2f}%" if ipca_acum_ano is not None else "-"
+                )
+                valor_12m_str = (
+                    f"{ipca_acum_12m:.2f}%" if ipca_acum_12m is not None else "-"
+                )
+            else:
+                valor_mensal_str = "sem dados"
+                valor_ano_str = "-"
+                valor_12m_str = "-"
+
+            df_ipca_curto = pd.DataFrame(
+                [
+                    {
+                        "Indicador": "IPCA (variação mensal)",
+                        "Data ref.": ipca_referencia or "-",
+                        "Variação mensal": valor_mensal_str,
+                        "Acum. no ano": valor_ano_str,
+                        "Acum. 12 meses": valor_12m_str,
+                        "Fonte": "IBGE / SIDRA (Tabela 1737)",
+                    }
+                ]
+            )
+            st.table(df_ipca_curto.set_index("Indicador"))
+
 
         # -------- Curvas & Tesouro BR --------
         with subtab_curvas_tesouro:
@@ -2702,7 +3037,7 @@ def get_tabela_ptax():
     return montar_tabela_ptax()
 
 
-@st.cache_data(ttl=60 * 30)
+@st.cache_data(ttl=60 * 60 * 24)
 def get_tabela_ibovespa_curto():
     return montar_tabela_ibovespa()
 
@@ -2783,19 +3118,14 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # 🔄 Atualiza ANBIMA + DI Futuro B3 no máximo 1 vez por dia (por servidor)
-    chave_dia = date.today().strftime("%Y-%m-%d")
-    with st.spinner("Atualizando curvas ANBIMA e histórico de DI Futuro B3..."):
-        try:
-            atualizar_dados_externos_cache(chave_dia)
-        except Exception as e:
-            st.warning(
-                "Não foi possível atualizar curvas ANBIMA / histórico de DI Futuro B3 "
-                "neste momento. Serão usados os últimos dados salvos em disco."
-            )
-            logging.exception(
-                "Erro ao atualizar dados externos (ANBIMA / DI Futuro B3): %s", e
-            )
+    # 🔌 Modo turbo / offline:
+# Não atualizamos mais ANBIMA / DI Futuro B3 em tempo real aqui.
+# Os dados vêm do cache salvo em disco, atualizado pelo script
+# `atualiza_dados_pesados.py`.
+#
+# Se em algum momento você quiser voltar a atualizar em tempo real,
+# é só restaurar o bloco antigo de `atualizar_dados_externos_cache(chave_dia)`.
+
 
     st.title("Observatório Macro")
     st.caption(
