@@ -828,6 +828,119 @@ def resumo_ipca_com_focus_mensal() -> Dict[str, Optional[float]]:
         "surpresa_mensal": surpresa,
     }
 
+def montar_tabela_focus_mensal_proximo_mes() -> Tuple[pd.DataFrame, str, str]:
+    """
+    Monta uma tabela com as medianas do Focus MENSAL
+    para o próximo mês-calendário.
+
+    Retorna:
+      - df_show: DataFrame com colunas [Indicador, Mês de referência, Mediana Focus]
+      - mes_txt: texto do mês de referência (ex.: "12/2025")
+      - data_base_txt: data da última coleta utilizada (ex.: "21/11/2025")
+    """
+    df = _carregar_focus_mensais_raw().copy()
+    if df.empty:
+        return pd.DataFrame(), "sem mês disponível", "sem data disponível"
+
+    # garante que temos as datas principais
+    df = df.dropna(subset=["Data", "DataReferencia"])
+    if df.empty:
+        return pd.DataFrame(), "sem mês disponível", "sem data disponível"
+
+    # -----------------------------
+    # descobre o próximo mês calendário
+    # -----------------------------
+    hoje = date.today()
+    primeiro_mes = hoje.replace(day=1)
+    prox_mes = primeiro_mes + relativedelta(months=1)
+    alvo_period = pd.Period(prox_mes, freq="M")
+
+    df["mes_ref"] = df["DataReferencia"].dt.to_period("M")
+    df_mes = df[df["mes_ref"] == alvo_period].copy()
+
+    # se não tiver projeção pro próximo mês, tenta o mês atual
+    if df_mes.empty:
+        mes_atual_period = pd.Period(primeiro_mes, freq="M")
+        df_mes = df[df["mes_ref"] == mes_atual_period].copy()
+        alvo_period = mes_atual_period
+        if df_mes.empty:
+            return pd.DataFrame(), "sem mês disponível", "sem data disponível"
+
+    # pega a mediana mais recente de cada indicador
+    df_mes = df_mes.sort_values(["Indicador", "Data"])
+    df_ult = df_mes.groupby("Indicador", as_index=False).tail(1)
+
+    # -----------------------------
+    # ORDEM E RÓTULOS – seguindo a lógica da tabela grande
+    # -----------------------------
+    # (substring que vem da API, rótulo exibido, é percentual?)
+    configs: List[Tuple[str, str, bool]] = [
+        ("IPCA",                         "IPCA (variação %)", True),
+        ("Câmbio",                       "Câmbio (R\\$/US\\$)", False),
+        ("IGP-M",                        "IGP-M (variação %)", True),
+        ("IPCA Administrados",           "IPCA Administrados (variação %)", True),
+        ("IPCA Alimentação no domicílio","IPCA Alimentação no domicílio (variação %)", True),
+        ("IPCA Bens industrializados",   "IPCA Bens industrializados (variação %)", True),
+        ("IPCA Livres",                  "IPCA Livres (variação %)", True),
+        ("IPCA Serviços",                "IPCA Serviços (variação %)", True),
+        ("Taxa de desocupação",          "Taxa de desocupação (%)", True),
+    ]
+
+    # mapa para achar posição na ordem
+    ordem_map = {sub: idx for idx, (sub, _, _) in enumerate(configs)}
+
+    def _achar_config(indic_api: str) -> Tuple[int, str, bool]:
+        """Retorna (ordem, rótulo bonitinho, se é %) para um indicador da API."""
+        for sub, rotulo, eh_pct in configs:
+            if indic_api == sub:
+                return ordem_map[sub], rotulo, eh_pct
+        # se não estiver na lista, joga pro final, assume % e mantém o nome cru
+        return len(configs), indic_api, True
+
+    mes_txt = alvo_period.to_timestamp().strftime("%m/%Y")
+    data_base = df_ult["Data"].max()
+    if pd.notna(data_base):
+        data_base_txt = pd.to_datetime(data_base).strftime("%d/%m/%Y")
+    else:
+        data_base_txt = "sem data disponível"
+
+    linhas: List[Dict[str, str]] = []
+
+    for _, row in df_ult.iterrows():
+        indic_api = str(row["Indicador"])
+        ordem, nome_exib, eh_percentual = _achar_config(indic_api)
+
+        # formata a mediana com 2 casas
+        try:
+            mediana_val = float(row["Mediana"])
+        except Exception:
+            mediana_val = float("nan")
+
+        if math.isnan(mediana_val):
+            mediana_str = "-"
+        else:
+            mediana_str = f"{mediana_val:.2f}%"
+            if not eh_percentual:
+                mediana_str = f"{mediana_val:.2f}"
+
+        linhas.append(
+            {
+                "ordem": ordem,
+                "Indicador": nome_exib,
+                "Mês de referência": mes_txt,
+                "Mediana Focus": mediana_str,
+            }
+        )
+
+    df_show = (
+        pd.DataFrame(linhas)
+        .sort_values(["ordem", "Indicador"])
+        .drop(columns=["ordem"])
+        .reset_index(drop=True)
+    )
+
+    return df_show, mes_txt, data_base_txt
+
 
 # =============================================================================
 # CÂMBIO – RESUMO (níveis + variações)
@@ -1377,10 +1490,10 @@ def montar_tabela_focus_top5() -> pd.DataFrame:
     anos = [ano_atual, ano_atual + 1]
 
     configs = [
-        ("IPCA (a.a., Top5)",                 "ipca",       None, True),
-        ("PIB Total (var.% a.a., Top5)",      "pib total",  None, True),
-        ("Selic (a.a., Top5)",                "selic",      None, True),
-        ("Câmbio (R\\$/US\\$, Top5)",             "cambio",     None, False),
+        ("IPCA (a.a.)",                 "ipca",       None, True),
+        ("PIB Total (var.% a.a.)",      "pib total",  None, True),
+        ("Selic (a.a.)",                "selic",      None, True),
+        ("Câmbio (R\\$/US\\$)",             "cambio",     None, False),
     ]
 
     linhas: List[Dict[str, str]] = []
@@ -2824,6 +2937,25 @@ def render_bloco1_observatorio_mercado(
                 f"desempenho histórico no Focus. Dados de {data_top5_txt}."
             )
             st.table(df_focus_top5.set_index("Indicador"))
+
+            # --- Nova tabela: expectativas mensais para o próximo mês ---
+            df_focus_mensal_prox, mes_prox_txt, data_mensal_txt = (
+                montar_tabela_focus_mensal_proximo_mes()
+            )
+
+            st.markdown("**Focus – Expectativas mensais para o próximo mês**")
+            st.caption(
+                "Mediana das projeções mensais para o próximo mês-calendário "
+                f"(mês de referência: {mes_prox_txt}). "
+                f"Dados do boletim Focus de {data_mensal_txt}."
+            )
+            if df_focus_mensal_prox.empty:
+                st.info(
+                    "Ainda não há expectativas mensais disponíveis para o próximo mês."
+                )
+            else:
+                st.table(df_focus_mensal_prox.set_index("Indicador"))
+
 
 
     # ==========================
