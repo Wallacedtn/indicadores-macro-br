@@ -345,11 +345,11 @@ background:rgba(10,26,29,0.95);">
   </svg>
 </div>
 <span style="font-size:1.4rem;font-weight:700;color:{ION_TEXT_PRIMARY};">
-  Indicadores de Curto Prazo – Brasil
+  Termômetro macro – Brasil (painel essencial)
 </span>
 </div>"""
 
-    st.markdown(header_html, unsafe_allow_html=True)
+
     st.markdown("### Mercado & Juros")
 
     # ======================= LINHA 1 ==========================

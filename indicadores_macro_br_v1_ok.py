@@ -13,6 +13,19 @@ import streamlit as st
 from typing import Optional, Dict, List, Tuple
 from functools import lru_cache
 from pathlib import Path
+from dados_macro_fiscal_br import carregar_dados_macro_fiscal_br
+from bloco_curto_prazo_br import (
+    render_bloco_curto_prazo_br,
+    metric_card,
+    _inject_ion_css_curto_prazo,
+    ICON_PERCENT,
+    ICON_CHART,
+    ICON_DOLLAR,
+    _format_delta_br,
+)
+
+from dados_curto_prazo_br import carregar_dados_curto_prazo_br
+
 from curvas_anbima import (
     atualizar_todas_as_curvas,
     montar_curva_anbima_hoje,
@@ -28,7 +41,14 @@ from ibovespa_ipea import (
     carregar_historico_ibovespa,
 )
 
-from bloco_curto_prazo_br import render_bloco_curto_prazo_br
+from bloco_curto_prazo_br import (
+    render_bloco_curto_prazo_br,
+    metric_card,
+    _inject_ion_css_curto_prazo,
+    ICON_PERCENT,
+    ICON_CHART,
+    ICON_DOLLAR,
+)
 from analise_tesouro_vs_curva import (
     comparar_tesouro_pre_vs_curva,
     comparar_tesouro_ipca_vs_curva,
@@ -2346,6 +2366,435 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
 
     return pd.DataFrame(linhas)
 
+def render_bloco_termometro_macro_br() -> None:
+    """
+    Termômetro macro – Brasil com dados reais onde já temos back-end pronto:
+      1) Selic Meta (Copom)
+      2) DI Futuro ~5 anos
+      3) IPCA do mês (m/m vs Focus)
+      7) Câmbio BRL/USD (PTAX)
+      8) Ibovespa – nível / variação no ano
+
+    Os demais ainda ficam com números de exemplo, só layout.
+    """
+    _inject_ion_css_curto_prazo()
+
+    # -----------------------------
+    # Carrega curto prazo (Selic, PTAX, Ibov, DI)
+    # -----------------------------
+    try:
+        dados = carregar_dados_curto_prazo_br()
+    except Exception:
+        dados = None
+
+    moeda = getattr(dados, "moeda_juros", None) if dados is not None else None
+    ativos = getattr(dados, "ativos_domesticos", None) if dados is not None else None
+
+    # -----------------------------
+    # Macro / fiscal (IBC-Br, etc.)
+    # -----------------------------
+    dados_macro = carregar_dados_macro_fiscal_br()
+
+    ibc_nivel = dados_macro.ibcbr_nivel
+    ibc_var_mom = dados_macro.ibcbr_var_mom
+    ibc_var_aa = dados_macro.ibcbr_var_aa
+    ibc_var_3m = dados_macro.ibcbr_var_3m_dessaz
+
+   
+    divida_nivel = dados_macro.divida_bruta_pct_pib
+    divida_delta_12m = dados_macro.divida_bruta_delta_pp_12m  # agora = m/m
+    divida_12m_ago = dados_macro.divida_bruta_pct_pib_12m_atras
+    divida_24m_ago = dados_macro.divida_bruta_pct_pib_24m_atras
+    divida_ref = dados_macro.divida_bruta_referencia
+
+    primario_mes_real_bi = dados_macro.primario_mes_real_bi
+    primario_mes_delta_real_bi_aa = dados_macro.primario_mes_delta_real_bi_aa
+    receita_real_var_aa_pct = dados_macro.receita_real_var_aa_pct
+    despesa_real_var_aa_pct = dados_macro.despesa_real_var_aa_pct
+    primario_ano_real_bi = dados_macro.primario_ano_real_bi
+    primario_ano_real_bi_prev = dados_macro.primario_ano_real_bi_prev
+
+
+    # -----------------------------
+    # IPCA + Focus (já vem do próprio indicadores_macro)
+    # -----------------------------
+    try:
+        resumo_ipca = resumo_ipca_com_focus_mensal()
+    except Exception:
+        resumo_ipca = {}
+
+    ipca_referencia = resumo_ipca.get("referencia")
+    ipca_mensal = resumo_ipca.get("mensal")
+    ipca_focus_mensal = resumo_ipca.get("focus_mensal")
+    ipca_surpresa_mensal = resumo_ipca.get("surpresa_mensal")
+
+    st.markdown("#### Termômetro macro – Brasil")
+    st.caption(
+        "Cards com dados reais onde já há infraestrutura pronta (Selic, DI, IPCA, "
+        "câmbio, bolsa). Os demais ainda usam valores ilustrativos."
+    )
+
+    # =====================================================
+    # LINHA 1
+    # =====================================================
+    col1, col2, col3, col4 = st.columns(4)
+
+        # 1) Selic meta – mesmo padrão do bloco Curto Prazo
+    with col1:
+        selic_atual = getattr(moeda, "selic_meta", None) if moeda is not None else None
+        selic_ultima = (
+            getattr(moeda, "selic_ultima_decisao", None) if moeda is not None else None
+        )
+        selic_delta = None
+        if selic_atual is not None and selic_ultima is not None:
+            selic_delta = selic_atual - selic_ultima
+
+        selic_subtext = "Δ vs última decisão do Copom"
+
+        metric_card(
+            "Selic meta",
+            selic_atual,
+            selic_delta,
+            fmt_value="{:.2f}",
+            value_is_pct=False,   # igual ao bloco de Curto Prazo (15,00 – sem %)
+            delta_is_pp=True,
+            badge="vs Copom",     # pill igual: VS COPOM
+            icon_html=ICON_PERCENT,
+            subtext=selic_subtext,
+        )
+
+
+    # 2) DI Futuro ~5 anos (ex.: DI Jan/31)
+    with col2:
+        di5_taxa = getattr(ativos, "di_5_anos_taxa", None) if ativos is not None else None
+        di5_delta = getattr(ativos, "di_5_anos_delta", None) if ativos is not None else None
+        di5_fonte = (
+            getattr(ativos, "di_5_anos_fonte_delta", None) if ativos is not None else None
+        )
+        di5_ticker = (
+            getattr(ativos, "di_5_anos_ticker", None) if ativos is not None else None
+        )
+        di5_delta_ano = (
+            getattr(ativos, "di_5_anos_delta_ano", None) if ativos is not None else None
+        )
+
+        if di5_ticker:
+            titulo_di5 = f"{di5_ticker} (B3)"
+        else:
+            titulo_di5 = "DI Futuro ~5 anos (B3)"
+
+        if di5_delta is None:
+            badge_di5 = None
+        else:
+            if di5_fonte == "intraday":
+                badge_di5 = "Δ p.p. no dia (B3)"
+            elif di5_fonte == "d-1":
+                badge_di5 = "Δ p.p. vs D-1"
+            else:
+                badge_di5 = "vs D-1"
+
+        subtext_di5 = None
+        if di5_delta_ano is not None:
+            if abs(di5_delta_ano) < 0.01:
+                subtext_di5 = "estável vs início do ano"
+            elif di5_delta_ano > 0:
+                subtext_di5 = (
+                    "abriu "
+                    + _format_delta_br(abs(di5_delta_ano), 2)
+                    + " p.p. desde o início do ano"
+                )
+            else:
+                subtext_di5 = (
+                    "fechou "
+                    + _format_delta_br(abs(di5_delta_ano), 2)
+                    + " p.p. desde o início do ano"
+                )
+
+        metric_card(
+            label=titulo_di5,
+            value=di5_taxa,
+            delta=di5_delta,
+            fmt_value="{:.2f}",
+            value_is_pct=False,
+            delta_is_pp=True,
+            badge=badge_di5,
+            icon_html=ICON_PERCENT,
+            subtext=subtext_di5,
+        )
+
+    # 3) IPCA – variação mensal (mesmo padrão do Curto Prazo)
+    with col3:
+        # badge: referência do mês (ex.: "10/2025")
+        badge_ipca = ipca_referencia or "mês ref."
+
+        # texto padrão
+        subtext_ipca = "IPCA mensal x mediana Focus."
+
+        focus_str = None
+        if ipca_focus_mensal is not None:
+            focus_str = f"{ipca_focus_mensal:.2f}%"
+
+        # se tiver Focus, mostra: "Mediana Focus para o mês: X,XX%"
+        if (ipca_mensal is not None) and (focus_str is not None):
+            subtext_ipca = f"Mediana Focus para o mês: {focus_str}"
+
+        metric_card(
+            "IPCA – variação mensal",
+            ipca_mensal,              # valor principal (IBGE)
+            ipca_surpresa_mensal,     # Δ vs Focus (em p.p.)
+            fmt_value="{:.2f}",
+            value_is_pct=True,        # X,XX%
+            delta_is_pp=True,         # seta: X,XX p.p.
+            badge=badge_ipca,         # "10/2025", por exemplo
+            icon_html=ICON_PERCENT,
+            subtext=subtext_ipca,
+        )
+
+
+    # 4) IBC-Br – nível / variação (dados reais)
+    with col4:
+        partes_ibc = []
+
+        if ibc_var_3m is not None:
+            partes_ibc.append(f"3m (dessaz.): {ibc_var_3m:+.2f}%")
+
+        if ibc_var_aa is not None:
+            partes_ibc.append(f"a/a (sem ajuste): {ibc_var_aa:+.2f}%")
+
+        if partes_ibc:
+            subtext_ibc = " | ".join(partes_ibc)
+        else:
+            subtext_ibc = (
+                "Variações em 3m e a/a não disponíveis "
+                "(erro ao carregar séries)."
+            )
+
+        metric_card(
+            label="IBC-Br – nível / variação",
+            value=ibc_nivel,           # nível atual (série SA)
+            delta=ibc_var_mom,         # m/m dessaz. → pílula
+            fmt_value="{:.2f}",
+            value_is_pct=False,
+            delta_is_pct=True,         # delta em %
+            badge="vs m-1",            # seta = mês vs mês anterior
+            icon_html=ICON_CHART,
+            subtext=subtext_ibc,       # "3m (dessaz.): ... | a/a (sem ajuste): ..."
+        )
+
+
+
+    st.markdown("&nbsp;", unsafe_allow_html=True)
+
+    # =====================================================
+    # LINHA 2
+    # =====================================================
+    col5, col6, col7, col8 = st.columns(4)
+
+    # 5) Confiança da Indústria (mock)
+    with col5:
+        metric_card(
+            label="Confiança da Indústria (ICI)",
+            value=98.3,
+            delta=1.2,
+            fmt_value="{:.1f}",
+            value_is_pct=False,
+            delta_is_pct=False,
+            badge="Exemplo – FGV",
+            icon_html=ICON_CHART,
+            subtext="Acima de 100 = otimismo; abaixo, pessimismo (EXEMPLO).",
+        )
+
+    # 6) Taxa de Desemprego – PNAD (mock)
+    with col6:
+        metric_card(
+            label="Desemprego – PNAD Contínua",
+            value=7.8,
+            delta=-0.2,
+            fmt_value="{:.1f}",
+            value_is_pct=True,
+            delta_is_pp=True,
+            badge="Exemplo – 3m móvel",
+            icon_html=ICON_PERCENT,
+            subtext="Queda de 0,2 p.p. em 12 meses (EXEMPLO).",
+        )
+
+    # 7) Câmbio BRL/USD (PTAX) – mesmo visual do Curto Prazo
+    with col7:
+        ptax = getattr(moeda, "ptax_fechamento", None) if moeda is not None else None
+        ptax_var_dia = (
+            getattr(moeda, "ptax_variacao_dia", None) if moeda is not None else None
+        )
+
+        # Monta texto: "12m: X,XX% | 24m: Y,YY%"
+        ptax_var_12m = (
+            getattr(moeda, "ptax_var_12m", None) if moeda is not None else None
+        )
+        ptax_var_24m = (
+            getattr(moeda, "ptax_var_24m", None) if moeda is not None else None
+        )
+
+        fx_parts = []
+        if ptax_var_12m is not None:
+            fx_parts.append("12m: " + _format_delta_br(ptax_var_12m, 2) + "%")
+        if ptax_var_24m is not None:
+            fx_parts.append("24m: " + _format_delta_br(ptax_var_24m, 2) + "%")
+        fx_subtext = " | ".join(fx_parts) if fx_parts else None
+
+        metric_card(
+            "PTAX – dólar (R$)",
+            ptax,
+            ptax_var_dia,
+            fmt_value="R$ {:.2f}",
+            value_is_pct=False,
+            delta_is_pct=True,   # variação em %
+            badge="intraday",
+            icon_html=ICON_DOLLAR,
+            subtext=fx_subtext,
+        )
+
+
+    # 8) Ibovespa – pts – igual ao card de Curto Prazo
+    with col8:
+        # nível do Ibov
+        valor_ibov = (
+            getattr(ativos, "ibov_nivel", None) if ativos is not None else None
+        )
+
+        # delta diário vs D-1
+        delta_ibov = (
+            getattr(ativos, "ibov_var_dia", None) if ativos is not None else None
+        )
+
+        # monta subtexto: "mês: X,XX% | ano: Y,YY%"
+        ibov_var_mes = (
+            getattr(ativos, "ibov_var_mes", None) if ativos is not None else None
+        )
+        ibov_var_ano_val = (
+            getattr(ativos, "ibov_var_ano", None) if ativos is not None else None
+        )
+
+        ibov_parts = []
+        if ibov_var_mes is not None:
+            ibov_parts.append("mês: " + _format_delta_br(ibov_var_mes, 2) + "%")
+        if ibov_var_ano_val is not None:
+            ibov_parts.append("ano: " + _format_delta_br(ibov_var_ano_val, 2) + "%")
+        ibov_subtext = " | ".join(ibov_parts) if ibov_parts else None
+
+        metric_card(
+            "Ibovespa – pts",
+            valor_ibov,
+            delta_ibov,
+            fmt_value="{:,.2f}",
+            value_is_pct=False,
+            delta_is_pct=True,
+            badge="vs D-1",
+            icon_html=ICON_CHART,
+            subtext=ibov_subtext,
+        )
+
+
+    st.markdown("&nbsp;", unsafe_allow_html=True)
+
+    # =====================================================
+    # LINHA 3 (fiscal & risco país – ainda mock)
+    # =====================================================
+    col9, col10, col11, col12 = st.columns(4)
+
+    # 9) CDS Brasil 5 anos (mock)
+    with col9:
+        metric_card(
+            label="CDS Brasil 5 anos",
+            value=150,
+            delta=-10.0,
+            fmt_value="{:.0f}",
+            value_is_pct=False,
+            delta_is_pct=False,
+            badge="Exemplo – 12m",
+            icon_html=ICON_CHART,
+            subtext="Queda de 10 p.b. em 12 meses (EXEMPLO).",
+        )
+
+    # 10) Dívida Bruta GG (% PIB) – dados reais
+    with col10:
+        # monta o texto com níveis de 12m e 24m atrás
+        if divida_12m_ago is not None and divida_24m_ago is not None:
+            subtext_divida = (
+                f"há 12m: {divida_12m_ago:.1f}% | "
+                f"há 24m: {divida_24m_ago:.1f}%"
+            )
+        elif divida_12m_ago is not None:
+            subtext_divida = f"há 12m: {divida_12m_ago:.1f}%"
+        elif divida_24m_ago is not None:
+            subtext_divida = f"há 24m: {divida_24m_ago:.1f}%"
+        else:
+            subtext_divida = (
+                "Níveis de 12m e 24m não disponíveis "
+                "(erro ao carregar série)."
+            )
+
+        metric_card(
+            label="Dívida Bruta GG (% PIB)",
+            value=divida_nivel,            # nível atual, ex.: 78,6%
+            delta=divida_delta_12m,        # Δ m/m em p.p.
+            fmt_value="{:.1f}",
+            value_is_pct=True,
+            delta_is_pp=True,
+            badge="vs m-1",                # indica que é mês vs mês anterior
+            icon_html=ICON_PERCENT,
+            subtext=subtext_divida,        # "há 12m: ... | há 24m: ..."
+        )
+
+    with col11:
+        partes_prim = []
+
+        # variação nominal a/a do mês
+        if receita_real_var_aa_pct is not None:
+            partes_prim.append(
+                f"Nominal a/a (mês): {receita_real_var_aa_pct:+.1f}%"
+            )
+
+        # saldo 12m nominal
+        if primario_ano_real_bi is not None:
+            txt_12m = f"Saldo 12m: {primario_ano_real_bi:+.1f} bi"
+            if primario_ano_real_bi_prev is not None:
+                txt_12m += f" (vs {primario_ano_real_bi_prev:+.1f} bi)"
+            partes_prim.append(txt_12m)
+
+        if partes_prim:
+            subtext_prim = " | ".join(partes_prim)
+        else:
+            subtext_prim = (
+                "Resultado primário calculado com série 10.04.1 do Tesouro."
+            )
+
+        metric_card(
+            label="Resultado Primário – Governo Central (mês, valores correntes)",
+            value=primario_mes_real_bi,          # ex.: 37.1 -> R$ 37,1 bi
+            delta=primario_mes_delta_real_bi_aa, # ex.: +4.1 -> R$ +4,1 bi vs mesmo mês a/a
+            fmt_value="R$ {:.1f} bi",
+            value_is_pct=False,
+            delta_is_pp=False,                   # delta em R$ bi
+            badge="vs mês a/a (nominal)",        # agora está honesto
+            icon_html=ICON_PERCENT,
+            subtext=subtext_prim,
+        )
+
+
+    # 12) Balança Comercial 12m (US$ bi) – mock
+    with col12:
+        metric_card(
+            label="Balança Comercial 12m (US$ bi)",
+            value=60.0,
+            delta=-5.0,
+            fmt_value="{:.1f}",
+            value_is_pct=False,
+            delta_is_pct=False,
+            badge="Exemplo – 12m",
+            icon_html=ICON_DOLLAR,
+            subtext="Superávit de US$ 60 bi em 12m (EXEMPLO).",
+        )
+
+
 def render_bloco1_observatorio_mercado(
     df_focus,
     df_focus_top5,
@@ -2377,14 +2826,18 @@ def render_bloco1_observatorio_mercado(
     # ==========================
     with tab_br:
         subtab_indic_br, subtab_exp_br, subtab_curvas_tesouro = st.tabs(
-            ["Curto prazo", "Expectativas", "Curvas & Tesouro"]
+            ["Painel", "Histórico", "Avançado"]
         )
 
         # -------- Indicadores BR --------
         with subtab_indic_br:
+            # Termômetro macro – Brasil (12 cards)
+            render_bloco_termometro_macro_br()
+
+
             # ---------- Ibovespa: dados para o card ----------
             ibov_nivel_atual = None
-            ibov_var_ano = None
+
 
             if df_ibov_curto is not None and not df_ibov_curto.empty:
                 linha_ibov = df_ibov_curto.iloc[0]
@@ -2441,14 +2894,14 @@ def render_bloco1_observatorio_mercado(
             ipca_surpresa_mensal = resumo_ipca.get("surpresa_mensal")
 
             # Bloco de cards / visão rápida (já vem com título próprio)
-            render_bloco_curto_prazo_br(
-                ibov_nivel_atual=ibov_nivel_atual,
-                ibov_var_ano=ibov_var_ano,
-                ipca_mensal=ipca_mensal,
-                ipca_surpresa_mensal=ipca_surpresa_mensal,
-                ipca_focus_mensal=ipca_focus_mensal,
-                ipca_referencia=ipca_referencia,
-            )
+            #render_bloco_curto_prazo_br(
+                #ibov_nivel_atual=ibov_nivel_atual,
+                #ibov_var_ano=ibov_var_ano,
+                #ipca_mensal=ipca_mensal,
+                #ipca_surpresa_mensal=ipca_surpresa_mensal,
+                #ipca_focus_mensal=ipca_focus_mensal,
+                #ipca_referencia=ipca_referencia,
+            #)
 
             # Linha separadora opcional
             st.markdown("---")
@@ -2963,7 +3416,7 @@ def render_bloco1_observatorio_mercado(
     # ==========================
     with tab_mundo:
         subtab_indic_world, subtab_exp_world = st.tabs(
-            ["Curto prazo", "Expectativas"]
+            ["Painel", "Histórico"]
         )
 
         # -------- Indicadores MUNDO --------
@@ -3290,7 +3743,7 @@ def main():
             "🌍 Setor Externo",
             "👷 Mercado de Trabalho",
             "🏭 Atividade Real",
-            "📈 Inflação",
+            "📈 Expectativas",
             "💳 Crédito & Condições",
         ]
     )
