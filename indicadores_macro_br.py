@@ -2841,10 +2841,6 @@ def render_bloco_termometro_macro_br() -> None:
     ipca_surpresa_mensal = resumo_ipca.get("surpresa_mensal")
 
     st.markdown("#### Termômetro macro – Brasil")
-    st.caption(
-        "Cards com dados reais onde já há infraestrutura pronta (Selic, DI, IPCA, "
-        "câmbio, bolsa). Os demais ainda usam valores ilustrativos."
-    )
 
     # =====================================================
     # LINHA 1
