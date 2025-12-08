@@ -231,6 +231,10 @@ def metric_card(
     badge: Optional[str] = None,
     icon_html: Optional[str] = None,
     subtext: Optional[str] = None,
+    delta_is_money: bool = False,
+    delta_money_prefix: str = "R$ ",
+    delta_money_suffix: str = " bi",
+    delta_money_decimals: int = 2,
 ) -> None:
     """
     Desenha um card:
@@ -253,6 +257,12 @@ def metric_card(
         if value_is_pct:
             display_value += "%"
 
+        # Card específico: Risco-País – spread 10Y (Brasil/USA)
+        # aqui adicionamos " p.b." no número grande
+        if label.startswith("Risco-País – spread 10Y"):
+            display_value += " p.b."
+
+
     # delta
     if delta is None:
         arrow = ""
@@ -273,6 +283,10 @@ def metric_card(
             delta_txt = _format_delta_br(delta, 2) + " p.p."
         elif delta_is_pct:
             delta_txt = _format_delta_br(delta, 2) + "%"
+        elif delta_is_money:
+            # modo dinheiro: prefixo + número formatado + sufixo
+            num = _format_delta_br(delta, delta_money_decimals)
+            delta_txt = f"{delta_money_prefix}{num}{delta_money_suffix}"
         else:
             delta_txt = _format_delta_br(delta, 2)
 
@@ -359,21 +373,33 @@ background:rgba(10,26,29,0.95);">
     with col1:
         selic_atual = getattr(moeda, "selic_meta", None)
         selic_ultima = getattr(moeda, "selic_ultima_decisao", None)
+
         selic_delta = None
         if selic_atual is not None and selic_ultima is not None:
+            # seta = Selic atual – Selic da ÚLTIMA reunião
             selic_delta = selic_atual - selic_ultima
 
-        # subtexto simples explicando o delta
-        selic_subtext = "Δ vs última decisão do Copom"
+        # Datas de Copom vindas do objeto moeda
+        data_proxima = getattr(moeda, "selic_referencia", None)          # PRÓXIMA reunião
+        data_ultima = getattr(moeda, "selic_data_ultima_reuniao", None)  # ÚLTIMA reunião
+
+        # Canto superior direito → sempre a PRÓXIMA reunião
+        badge_selic = data_proxima or "Próx. Copom"
+
+        # Texto de baixo → mostra a data da ÚLTIMA reunião + explicação do delta
+        if data_ultima:
+            selic_subtext = f"Última: {data_ultima} • Δ vs última decisão do Copom"
+        else:
+            selic_subtext = "Δ vs última decisão do Copom"
 
         metric_card(
             "Selic meta",
             selic_atual,
             selic_delta,
             fmt_value="{:.2f}",
-            value_is_pct=False,
-            delta_is_pp=True,
-            badge="vs Copom",
+            value_is_pct=False,   # 15,00 (sem %)
+            delta_is_pp=True,     # mostra "p.p."
+            badge=badge_selic,    # próxima reunião no canto direito
             icon_html=ICON_PERCENT,
             subtext=selic_subtext,
         )

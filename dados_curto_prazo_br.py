@@ -6,9 +6,10 @@ import requests
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 from functools import lru_cache
 from dateutil.relativedelta import relativedelta
+from icalendar import Calendar
 def _to_float_scalar(val: Any) -> float:
     """
     Converte de forma segura um valor vindo de pandas para float nativo.
@@ -63,8 +64,12 @@ class MoedaJurosCurtoPrazo:
     selic_12m: Optional[float] = None
     selic_24m: Optional[float] = None
     selic_ultima_decisao: Optional[float] = None  # nível ANTES do último Copom
+    selic_referencia: Optional[str] = None        # data da PRÓXIMA reunião do Copom (dd/mm/aaaa)
+    selic_data_ultima_reuniao: Optional[str] = None  # data da ÚLTIMA reunião do Copom (dd/mm/aaaa)
     cdi_no_ano: Optional[float] = None
+
     cdi_em_12_meses: Optional[float] = None
+
 
     # PTAX – níveis e variações 12m / 24m
     ptax_nivel_12m: Optional[float] = None
@@ -137,6 +142,185 @@ def _dois_anos_atras_str() -> str:
 def _quatro_anos_atras_str() -> str:
     dt = date.today() - relativedelta(years=4)
     return dt.strftime("%d/%m/%Y")
+
+# =============================================================================
+# Calendário do Copom – via .ics do BC
+# =============================================================================
+
+COPOM_ICS_URL = (
+    "https://www.bcb.gov.br/api/exportarics/sitebcb/agendaics?"
+    "lista=Reuni%C3%B5es%20do%20Copom"
+)
+
+# Fallback se o .ics estiver fora do ar ou mudar muito o formato
+COPOM_DATAS_FIXAS = [
+    # 2024
+    date(2024, 1, 31),
+    date(2024, 3, 20),
+    date(2024, 5, 8),
+    date(2024, 6, 19),
+    date(2024, 7, 31),
+    date(2024, 9, 18),
+    date(2024, 11, 6),
+    date(2024, 12, 11),
+    # 2025
+    date(2025, 1, 29),
+    date(2025, 3, 19),
+    date(2025, 5, 7),
+    date(2025, 6, 18),
+    date(2025, 7, 30),
+    date(2025, 9, 17),
+    date(2025, 11, 5),
+    date(2025, 12, 10),
+    # 2026
+    date(2026, 1, 28),
+    date(2026, 3, 18),
+    date(2026, 4, 29),
+    date(2026, 6, 17),
+    date(2026, 8, 5),
+    date(2026, 9, 16),
+    date(2026, 11, 4),
+    date(2026, 12, 9),
+]
+
+# cache em memória das datas carregadas
+_CACHED_DATAS_COPOM: Optional[List[date]] = None
+
+
+def _carregar_datas_copom_ics() -> List[date]:
+    """Baixa o .ics do BC e extrai as datas de decisão do Copom."""
+    resp = requests.get(COPOM_ICS_URL, timeout=10)
+    resp.raise_for_status()
+
+    cal = Calendar.from_ical(resp.text)
+    datas: List[date] = []
+
+    for comp in cal.walk("VEVENT"):
+        dtstart = comp.get("DTSTART").dt
+        dtend = comp.get("DTEND").dt
+
+        # usamos o ÚLTIMO dia da reunião como "data da decisão"
+        if isinstance(dtend, datetime):
+            decisao = dtend.date()
+        elif isinstance(dtend, date):
+            decisao = dtend
+        else:
+            # fallback: dtstart + 1 dia
+            if isinstance(dtstart, datetime):
+                decisao = (dtstart + timedelta(days=1)).date()
+            else:
+                decisao = dtstart + timedelta(days=1)
+
+        if isinstance(decisao, date):
+            datas.append(decisao)
+
+    datas = sorted(set(datas))
+    return datas
+
+
+def _get_datas_copom() -> List[date]:
+    """
+    Tenta carregar as datas do Copom do .ics.
+    Se der erro, usa a lista fixa.
+    """
+    global _CACHED_DATAS_COPOM
+
+    if _CACHED_DATAS_COPOM is not None:
+        return _CACHED_DATAS_COPOM
+
+    datas: List[date] = []
+    try:
+        datas = _carregar_datas_copom_ics()
+    except Exception:
+        datas = []
+
+    if not datas:
+        datas = COPOM_DATAS_FIXAS
+
+    _CACHED_DATAS_COPOM = datas
+    return datas
+
+
+def obter_ultima_e_proxima_reuniao_copom(
+    ref: date,
+) -> Tuple[Optional[date], Optional[date]]:
+    """
+    Dada uma data de referência, devolve:
+      - última reunião do Copom (<= ref)
+      - próxima reunião do Copom (> ref)
+    """
+    datas = _get_datas_copom()
+    if not datas:
+        return None, None
+
+    ultima: Optional[date] = None
+    proxima: Optional[date] = None
+
+    for d in datas:
+        if d <= ref:
+            ultima = d
+        elif d > ref and proxima is None:
+            proxima = d
+            break
+
+    return ultima, proxima
+
+# ---------------- COPOM – CALENDÁRIO BÁSICO ----------------
+# Datas de DIVULGAÇÃO das decisões (2º dia da reunião)
+COPOM_DATAS_DECISAO = [
+    # 2024
+    date(2024, 1, 31),
+    date(2024, 3, 20),
+    date(2024, 5, 8),
+    date(2024, 6, 19),
+    date(2024, 7, 31),
+    date(2024, 9, 18),
+    date(2024, 11, 6),
+    date(2024, 12, 18),
+    # 2025
+    date(2025, 1, 29),
+    date(2025, 3, 19),
+    date(2025, 5, 7),
+    date(2025, 6, 18),
+    date(2025, 7, 30),
+    date(2025, 9, 17),
+    date(2025, 11, 5),
+    date(2025, 12, 10),
+    # 2026
+    date(2026, 1, 28),
+    date(2026, 3, 18),
+    date(2026, 4, 29),
+    date(2026, 6, 17),
+    date(2026, 8, 5),
+    date(2026, 9, 16),
+    date(2026, 11, 4),
+    date(2026, 12, 9),
+]
+
+
+def obter_ultima_e_proxima_reuniao_copom(
+    ref: date,
+) -> tuple[Optional[date], Optional[date]]:
+    """
+    Dada uma data de referência, devolve:
+      - última reunião do Copom (<= ref)
+      - próxima reunião do Copom (> ref)
+    """
+    if not COPOM_DATAS_DECISAO:
+        return None, None
+
+    datas = sorted(COPOM_DATAS_DECISAO)
+    ultima: Optional[date] = None
+    proxima: Optional[date] = None
+
+    for d in datas:
+        if d <= ref:
+            ultima = d
+        elif d > ref and proxima is None:
+            proxima = d
+            break
+
+    return ultima, proxima
 
 
 @lru_cache(maxsize=32)
@@ -863,6 +1047,8 @@ def carregar_dados_curto_prazo_br() -> DadosCurtoPrazoBR:
     selic_12m = None
     selic_24m = None
     selic_ultima_decisao = None
+    selic_referencia = None          # aqui vai ficar a PRÓXIMA reunião
+    selic_data_ultima_reuniao = None # aqui vai a ÚLTIMA reunião (texto)
 
     cdi_dia = None
     cdi_acumulado_mes = None
@@ -894,6 +1080,27 @@ def carregar_dados_curto_prazo_br() -> DadosCurtoPrazoBR:
             selic_meta = float(df_selic["valor"].iloc[-1])
 
             ultima_data = df_selic["data"].iloc[-1]
+
+            # Usa a última data disponível da Selic como referência pro calendário
+            ref_data = ultima_data.date() if hasattr(ultima_data, "date") else ultima_data
+
+            dt_ultima, dt_proxima = obter_ultima_e_proxima_reuniao_copom(ref_data)
+
+            # Próxima reunião -> badge do card
+            if dt_proxima is not None:
+                selic_referencia = dt_proxima.strftime("%d/%m/%Y")
+            else:
+                # fallback: data do último dado da Selic
+                try:
+                    selic_referencia = ultima_data.strftime("%d/%m/%Y")
+                except Exception:
+                    selic_referencia = None
+
+            # Última reunião -> texto "Última: dd/mm/aaaa"
+            if dt_ultima is not None:
+                selic_data_ultima_reuniao = dt_ultima.strftime("%d/%m/%Y")
+
+            # Médias 12m e 24m (igual já era)
             corte_12m = ultima_data - relativedelta(years=1)
             corte_24m = ultima_data - relativedelta(years=2)
 
@@ -905,12 +1112,20 @@ def carregar_dados_curto_prazo_br() -> DadosCurtoPrazoBR:
             if not df_12m.empty:
                 selic_12m = float(df_12m["valor"].mean())
 
-            # "Última decisão" = último nível diferente do atual (aprox. pré-Copom)
-            df_antes = df_selic[df_selic["valor"] != selic_meta]
-            if not df_antes.empty:
-                selic_ultima_decisao = float(df_antes["valor"].iloc[-1])
-            else:
-                selic_ultima_decisao = selic_meta
+            # Selic na ÚLTIMA reunião do Copom
+            selic_ultima_decisao = None
+            if dt_ultima is not None:
+                df_ate_ultima = df_selic[df_selic["data"] <= pd.Timestamp(dt_ultima)]
+                if not df_ate_ultima.empty:
+                    selic_ultima_decisao = float(df_ate_ultima["valor"].iloc[-1])
+
+            # Fallback: se não achou nada, usa último nível diferente do atual
+            if selic_ultima_decisao is None:
+                df_antes = df_selic[df_selic["valor"] != selic_meta]
+                if not df_antes.empty:
+                    selic_ultima_decisao = float(df_antes["valor"].iloc[-1])
+                else:
+                    selic_ultima_decisao = selic_meta
     except Exception:
         # Deixa nos defaults
         pass
@@ -1004,13 +1219,21 @@ def carregar_dados_curto_prazo_br() -> DadosCurtoPrazoBR:
         selic_12m=selic_12m,
         selic_24m=selic_24m,
         selic_ultima_decisao=selic_ultima_decisao,
+        selic_referencia=selic_referencia,               # PRÓXIMA reunião
+        selic_data_ultima_reuniao=selic_data_ultima_reuniao,  # ÚLTIMA reunião
         cdi_no_ano=cdi_no_ano,
         cdi_em_12_meses=cdi_em_12_meses,
         ptax_nivel_12m=ptax_nivel_12m,
         ptax_nivel_24m=ptax_nivel_24m,
         ptax_var_12m=ptax_var_12m,
         ptax_var_24m=ptax_var_24m,
-    )   
+    )
+
+    # Campos extras ligados ao calendário do Copom
+    # (não estão declarados no dataclass, mas o Python permite adicionar depois)
+    moeda_juros.selic_data_ultima_reuniao = selic_data_ultima_reuniao
+
+ 
 
     # ---------------------
     # Ativos domésticos

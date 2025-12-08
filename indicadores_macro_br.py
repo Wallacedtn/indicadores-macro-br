@@ -8,12 +8,18 @@ import requests
 import pandas as pd
 import unicodedata
 from datetime import datetime, date, timedelta
+from datetime import timedelta as _td
 from dateutil.relativedelta import relativedelta
 import streamlit as st
 from typing import Optional, Dict, List, Tuple
 from functools import lru_cache
 from pathlib import Path
 from dados_macro_fiscal_br import carregar_dados_macro_fiscal_br
+from di_futuro_b3 import carregar_historico_di_futuro
+from risco_brasil_spread_10y import (
+    atualizar_spread_10y, 
+    carregar_risco_brasil_spread_10y,
+)
 from bloco_curto_prazo_br import (
     render_bloco_curto_prazo_br,
     metric_card,
@@ -138,6 +144,9 @@ IBGE_VARIAVEL_IPCA15 = 355
 
 IBGE_NIVEL_BRASIL = "n1/all"  # nível Brasil
 
+EMBI_CACHE_PATH = Path("data/embi_brasil.csv")
+
+
 # FOCUS – endpoint definitivo (ExpectativasMercadoAnuais)
 FOCUS_BASE_URL = (
     "https://olinda.bcb.gov.br/olinda/servico/"
@@ -172,6 +181,12 @@ FOCUS_CACHE_DIR = DATA_EXPECTATIVAS_DIR
 FOCUS_CACHE_FILE = FOCUS_CACHE_DIR / "focus_expectativas_anuais.csv"
 FOCUS_TOP5_CACHE_FILE = FOCUS_CACHE_DIR / "focus_expectativas_top5_anuais.csv"
 FOCUS_MENSAIS_CACHE_FILE = FOCUS_CACHE_DIR / "focus_expectativas_mensais.csv"
+
+DATA_CURVAS_TESOURO_DIR = DATA_DIR / "curvas_tesouro"
+
+# === Balança Comercial (CSV mensal em US$ milhões) ==========================
+DATA_SETOR_EXTERNO_DIR = DATA_DIR / "setor_externo"
+BALANCA_COMERCIAL_CSV = DATA_SETOR_EXTERNO_DIR / "balanca_comercial_mensal_usd.csv"
 
 
 
@@ -226,6 +241,21 @@ def _parse_periodo(p: str) -> pd.Timestamp:
         return pd.to_datetime(p)
     except Exception:
         return pd.NaT
+
+def _icon_mes_ref(mes_ref: Optional[str]) -> str:
+    """
+    Gera o HTML do 'badge' de mês (ex.: 10/25) no lugar do ícone padrão.
+    Se não tiver mês, cai no ícone de porcentagem (padrão dos outros cards).
+    """
+    if not mes_ref:
+        return ICON_PERCENT
+
+    mes_ref = mes_ref.strip()
+    return f"""
+    <div class="metric-icon metric-icon-text">
+        <span>{mes_ref}</span>
+    </div>
+    """
 
 
 # =============================================================================
@@ -961,6 +991,123 @@ def montar_tabela_focus_mensal_proximo_mes() -> Tuple[pd.DataFrame, str, str]:
 
     return df_show, mes_txt, data_base_txt
 
+def carregar_balanca_comercial_mensal_de_csv() -> pd.DataFrame:
+    """
+    Lê o CSV com saldo mensal da balança comercial em US$ milhões.
+
+    Espera um arquivo em:
+      data/setor_externo/balanca_comercial_mensal_usd.csv
+
+    Colunas esperadas (nomes flexíveis):
+      - data
+      - saldo_usd_milhoes  (ou 'saldo' / 'valor')
+    """
+    try:
+        df = pd.read_csv(BALANCA_COMERCIAL_CSV)
+    except FileNotFoundError:
+        return pd.DataFrame(columns=["data", "valor"])
+
+    # normaliza nomes
+    df.columns = [c.strip().lower() for c in df.columns]
+
+    # coluna de data
+    col_data = "data"
+    if col_data not in df.columns:
+        for cand in ("mes", "competencia"):
+            if cand in df.columns:
+                col_data = cand
+                break
+
+    # coluna de valor
+    col_valor = "saldo_usd_milhoes"
+    if col_valor not in df.columns:
+        for cand in ("saldo", "valor"):
+            if cand in df.columns:
+                col_valor = cand
+                break
+
+    df["data"] = pd.to_datetime(df[col_data], errors="coerce")
+    df["valor"] = pd.to_numeric(df[col_valor], errors="coerce")
+
+    df = df[["data", "valor"]].dropna().sort_values("data").reset_index(drop=True)
+    return df
+
+
+def resumo_balanca_comercial_mensal() -> Dict[str, Optional[float]]:
+    """
+    A partir da série mensal (US$ milhões) devolve:
+
+      - referencia        : 'mm/aaaa'
+      - saldo_mes_bi      : saldo do mês (US$ bi)
+      - var_mes_pct_aa    : % vs mesmo mês do ano anterior
+      - acum_ano_bi       : acumulado no ano (US$ bi)
+      - acum_ano_var_pct  : % acima/abaixo do mesmo período do ano anterior
+    """
+    df = carregar_balanca_comercial_mensal_de_csv()
+    if df is None or df.empty:
+        return {
+            "referencia": None,
+            "saldo_mes_bi": None,
+            "var_mes_pct_aa": None,
+            "acum_ano_bi": None,
+            "acum_ano_var_pct": None,
+        }
+
+    df = df.sort_values("data").copy()
+    df["periodo"] = df["data"].dt.to_period("M")
+
+    # último mês disponível
+    ultimo = df.iloc[-1]
+    data_ref = ultimo["data"]
+    periodo_ref = ultimo["periodo"]
+    ref_str = data_ref.strftime("%m/%Y")
+
+    saldo_mes_milhoes = float(ultimo["valor"])
+    saldo_mes_bi = saldo_mes_milhoes / 1000.0
+
+    # mesmo mês do ano anterior
+    periodo_aa = periodo_ref - 12
+    df_aa = df[df["periodo"] == periodo_aa]
+    if df_aa.empty:
+        var_mes_pct_aa = None
+    else:
+        valor_aa = float(df_aa.iloc[-1]["valor"])
+        if valor_aa == 0:
+            var_mes_pct_aa = None
+        else:
+            var_mes_pct_aa = (saldo_mes_milhoes / valor_aa - 1.0) * 100.0
+
+    # acumulado no ano (até o mês de referência)
+    ano_ref = data_ref.year
+    mes_ref = data_ref.month
+
+    df_ano = df[(df["data"].dt.year == ano_ref) & (df["data"].dt.month <= mes_ref)]
+    acum_ano_milhoes = float(df_ano["valor"].sum()) if not df_ano.empty else None
+
+    ano_aa = ano_ref - 1
+    df_ano_aa = df[
+        (df["data"].dt.year == ano_aa) & (df["data"].dt.month <= mes_ref)
+    ]
+    acum_ano_aa_milhoes = float(df_ano_aa["valor"].sum()) if not df_ano_aa.empty else None
+
+    if acum_ano_milhoes is None:
+        acum_ano_bi = None
+        acum_ano_var_pct = None
+    else:
+        acum_ano_bi = acum_ano_milhoes / 1000.0
+        if not acum_ano_aa_milhoes or acum_ano_aa_milhoes == 0:
+            acum_ano_var_pct = None
+        else:
+            acum_ano_var_pct = (acum_ano_milhoes / acum_ano_aa_milhoes - 1.0) * 100.0
+
+    return {
+        "referencia": ref_str,
+        "saldo_mes_bi": saldo_mes_bi,
+        "var_mes_pct_aa": var_mes_pct_aa,
+        "acum_ano_bi": acum_ano_bi,
+        "acum_ano_var_pct": acum_ano_var_pct,
+    }
+
 
 # =============================================================================
 # CÂMBIO – RESUMO (níveis + variações)
@@ -1133,6 +1280,121 @@ def _carregar_focus_raw() -> pd.DataFrame:
         pass
 
     return df
+
+# ----------------------------
+# Ipeadata – Novo CAGED (saldo Brasil)
+# ----------------------------
+IPEADATA_BASE_URL = "http://ipeadata.gov.br/api/odata4/ValoresSerie(SERCODIGO='{codigo}')"
+SERIE_CAGED_SALDO_BR = "CAGED12_SALDON12"
+
+def _carregar_caged_saldo_df() -> pd.DataFrame:
+    """
+    Baixa do Ipeadata o saldo de empregos formais (Novo CAGED, Brasil),
+    em pessoas, e devolve DataFrame com:
+      - data
+      - valor
+    """
+    url = IPEADATA_BASE_URL.format(codigo=SERIE_CAGED_SALDO_BR)
+
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        dados = resp.json()
+    except Exception as e:
+        print(f"[DEBUG CAGED] Erro na requisição Ipeadata: {e}")
+        return pd.DataFrame()
+
+    valores = dados.get("value", [])
+    if not valores:
+        print("[DEBUG CAGED] JSON sem campo 'value' ou lista vazia.")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(valores)
+
+    # Campos padrão do Ipeadata OData: VALDATA (data) e VALVALOR (valor)
+    if "VALDATA" not in df.columns or "VALVALOR" not in df.columns:
+        print(f"[DEBUG CAGED] Colunas inesperadas no Ipeadata: {df.columns.tolist()}")
+        return pd.DataFrame()
+
+    df["VALDATA"] = pd.to_datetime(df["VALDATA"])
+    df["VALVALOR"] = pd.to_numeric(df["VALVALOR"], errors="coerce")
+
+    df = (
+        df.dropna(subset=["VALDATA", "VALVALOR"])
+        .sort_values("VALDATA")
+        .reset_index(drop=True)
+    )
+
+    return df.rename(columns={"VALDATA": "data", "VALVALOR": "valor"})
+
+
+def resumo_caged_saldo_novo() -> dict:
+    """
+    Monta um resumo simples para o card do CAGED:
+      - saldo_atual       -> último valor (vagas)
+      - saldo_12m         -> valor 12 meses atrás
+      - saldo_24m         -> valor 24 meses atrás
+      - delta_12m         -> diferença (atual - 12m atrás), em vagas
+      - referencia        -> "mm/aaaa" do último dado
+      - media_mes_5anos   -> média dos últimos 5 anos do MESMO mês (ex.: todos os outubros)
+    """
+    try:
+        df = _carregar_caged_saldo_df()
+    except Exception:
+        return {
+            "saldo_atual": None,
+            "saldo_12m": None,
+            "saldo_24m": None,
+            "delta_12m": None,
+            "referencia": None,
+            "media_mes_5anos": None,
+        }
+
+    if df.empty:
+        return {
+            "saldo_atual": None,
+            "saldo_12m": None,
+            "saldo_24m": None,
+            "delta_12m": None,
+            "referencia": None,
+            "media_mes_5anos": None,
+        }
+
+    # último dado disponível na série
+    ult = df.iloc[-1]
+    data_ref = ult["data"]             # ex.: 2025-10-01
+    saldo_atual = float(ult["valor"])  # pessoas
+
+    idx_ult = df.index[-1]
+
+    saldo_12m = float(df.iloc[idx_ult - 12]["valor"]) if idx_ult >= 12 else None
+    saldo_24m = float(df.iloc[idx_ult - 24]["valor"]) if idx_ult >= 24 else None
+
+    delta_12m = saldo_atual - saldo_12m if saldo_12m is not None else None
+
+    ref_str = data_ref.strftime("%m/%Y")   # "10/2025"
+
+    # -------- média dos últimos 5 anos do MESMO mês --------
+    ano_ref = data_ref.year
+    mes_ref = data_ref.month
+
+    mask_5anos = (
+        (df["data"].dt.month == mes_ref)
+        & (df["data"].dt.year >= ano_ref - 5)
+        & (df["data"].dt.year < ano_ref)   # só anos ANTERIORES
+    )
+    df_5anos = df.loc[mask_5anos]
+
+    media_mes_5anos = float(df_5anos["valor"].mean()) if not df_5anos.empty else None
+
+    return {
+        "saldo_atual": saldo_atual,
+        "saldo_12m": saldo_12m,
+        "saldo_24m": saldo_24m,
+        "delta_12m": delta_12m,
+        "referencia": ref_str,
+        "media_mes_5anos": media_mes_5anos,
+    }
 
 
 @lru_cache(maxsize=1)
@@ -2366,6 +2628,146 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
 
     return pd.DataFrame(linhas)
 
+
+@lru_cache(maxsize=1)
+def carregar_risco_brasil_embi() -> Tuple[Optional[float], Optional[float], Optional[str], Optional[float]]:
+    """
+    Agora NÃO usa mais o EMBI do Ipeadata.
+
+    Lê o CSV 'data/curto_prazo/risco_brasil_spread_10y.csv',
+    gerado por risco_brasil_spread_10y.atualizar_spread_10y().
+
+    Retorna:
+    - risco_nivel: último valor do spread (pontos-base)
+    - risco_delta_aa: diferença vs ~12 meses atrás (pontos-base), se houver base
+    - referencia: string "MM/AAAA" da última data disponível
+    - risco_media_12m: média dos últimos 12 meses (pontos-base), se houver base
+    """
+    base_dir = Path(__file__).resolve().parent
+    csv_path = base_dir / "data" / "curto_prazo" / "risco_brasil_spread_10y.csv"
+
+    if not csv_path.exists():
+        print(f"[spread 10y] CSV não encontrado: {csv_path}")
+        return None, None, None, None
+
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[spread 10y] Erro ao ler CSV: {exc}")
+        return None, None, None, None
+
+    if "data" not in df.columns or "spread_pb" not in df.columns:
+        print(f"[spread 10y] Colunas 'data' e 'spread_pb' não encontradas em {csv_path}")
+        return None, None, None, None
+
+    df["data"] = pd.to_datetime(df["data"], errors="coerce")
+    df["spread_pb"] = pd.to_numeric(df["spread_pb"], errors="coerce")
+
+    df = (
+        df.dropna(subset=["data", "spread_pb"])
+        .sort_values("data")
+        .reset_index(drop=True)
+    )
+
+    if df.empty:
+        return None, None, None, None
+
+    # Último ponto
+    ultimo = df.iloc[-1]
+    data_ult = ultimo["data"]
+    risco_nivel = float(ultimo["spread_pb"])
+    referencia = data_ult.strftime("%m/%Y")
+
+    # Ponto ~12 meses atrás (janela ±7 dias) — se ainda não tiver 12m de dados, fica None
+    alvo_aa = data_ult - _td(days=365)
+    janela = df[
+        (df["data"] >= alvo_aa - _td(days=7))
+        & (df["data"] <= alvo_aa + _td(days=7))
+    ]
+
+    risco_delta_aa: Optional[float] = None
+    if not janela.empty:
+        valor_aa = float(janela.iloc[-1]["spread_pb"])
+        risco_delta_aa = risco_nivel - valor_aa
+
+    # Média 12m
+    risco_media_12m: Optional[float] = None
+    ult_12m = df[df["data"] >= (data_ult - _td(days=365))]
+    if not ult_12m.empty:
+        risco_media_12m = float(ult_12m["spread_pb"].mean())
+
+    return risco_nivel, risco_delta_aa, referencia, risco_media_12m
+
+
+@lru_cache(maxsize=1)
+def obter_referencia_di_futuro() -> Optional[str]:
+    """Retorna a data de referência da curva DI Futuro (última data do histórico),
+    formatada como 'dd/mm/aaaa', ou None se não for possível carregar.
+    """
+    try:
+        df_di = carregar_historico_di_futuro()
+    except Exception:
+        return None
+
+    if df_di is None or df_di.empty:
+        return None
+
+    # a coluna 'data' já vem como date em di_futuro_b3, mas garantimos aqui
+    data_ult = df_di["data"].max()
+    if hasattr(data_ult, "date"):
+        data_ult = data_ult.date()
+
+    try:
+        return data_ult.strftime("%d/%m/%Y")
+    except Exception:
+        return None
+    
+@lru_cache(maxsize=1)
+def obter_referencia_ptax() -> Optional[str]:
+    """Data de referência da PTAX (último dado), em dd/mm/aaaa."""
+    try:
+        df_fx = buscar_ptax_venda()
+    except Exception:
+        return None
+
+    if df_fx is None or df_fx.empty:
+        return None
+
+    data_ult = df_fx["data"].max()
+    if hasattr(data_ult, "date"):
+        data_ult = data_ult.date()
+
+    try:
+        return data_ult.strftime("%d/%m/%Y")
+    except Exception:
+        return None
+
+
+@lru_cache(maxsize=1)
+def obter_referencia_ibovespa() -> Optional[str]:
+    """Data de referência do Ibovespa (último fechamento), em dd/mm/aaaa."""
+    try:
+        df_hist = obter_historico_ibovespa_inteligente()
+    except Exception:
+        try:
+            df_hist = carregar_historico_ibovespa()
+        except Exception:
+            return None
+
+    if df_hist is None or df_hist.empty:
+        return None
+
+    data_ult = df_hist["data"].max()
+    if hasattr(data_ult, "date"):
+        data_ult = data_ult.date()
+
+    try:
+        return data_ult.strftime("%d/%m/%Y")
+    except Exception:
+        return None
+
+
+
 def render_bloco_termometro_macro_br() -> None:
     """
     Termômetro macro – Brasil com dados reais onde já temos back-end pronto:
@@ -2399,13 +2801,23 @@ def render_bloco_termometro_macro_br() -> None:
     ibc_var_mom = dados_macro.ibcbr_var_mom
     ibc_var_aa = dados_macro.ibcbr_var_aa
     ibc_var_3m = dados_macro.ibcbr_var_3m_dessaz
+    ibc_ref = dados_macro.ibcbr_referencia
 
    
     divida_nivel = dados_macro.divida_bruta_pct_pib
-    divida_delta_12m = dados_macro.divida_bruta_delta_pp_12m  # agora = m/m
+    divida_delta_mom = dados_macro.divida_bruta_delta_pp_12m  # ainda é m/m
     divida_12m_ago = dados_macro.divida_bruta_pct_pib_12m_atras
     divida_24m_ago = dados_macro.divida_bruta_pct_pib_24m_atras
     divida_ref = dados_macro.divida_bruta_referencia
+
+    # Δ a/a em p.p. (nível atual – nível do mesmo mês há 12m)
+    divida_delta_aa = None
+    if (divida_nivel is not None) and (divida_12m_ago is not None):
+        divida_delta_aa = divida_nivel - divida_12m_ago
+
+    # badge com a referência da dívida, se existir (ex.: "10/2025")
+    badge_divida = divida_ref or "vs a/a (p.p.)"
+
 
     primario_mes_real_bi = dados_macro.primario_mes_real_bi
     primario_mes_delta_real_bi_aa = dados_macro.primario_mes_delta_real_bi_aa
@@ -2439,26 +2851,39 @@ def render_bloco_termometro_macro_br() -> None:
     # =====================================================
     col1, col2, col3, col4 = st.columns(4)
 
-        # 1) Selic meta – mesmo padrão do bloco Curto Prazo
+    # 1) Selic meta – Δ vs última reunião do Copom
     with col1:
         selic_atual = getattr(moeda, "selic_meta", None) if moeda is not None else None
         selic_ultima = (
             getattr(moeda, "selic_ultima_decisao", None) if moeda is not None else None
         )
+
         selic_delta = None
         if selic_atual is not None and selic_ultima is not None:
+            # seta = Selic atual – Selic na ÚLTIMA reunião
             selic_delta = selic_atual - selic_ultima
 
-        selic_subtext = "Δ vs última decisão do Copom"
+        # datas vindas do objeto "moeda"
+        data_proxima = getattr(moeda, "selic_referencia", None)           # próxima reunião
+        data_ultima = getattr(moeda, "selic_data_ultima_reuniao", None)   # última reunião
+
+        # Canto superior direito → PRÓXIMA reunião do Copom
+        badge_selic = data_proxima or "Próx. Copom"
+
+        # Texto de baixo → data da ÚLTIMA reunião + explicação do delta
+        if data_ultima:
+            selic_subtext = f"Última decisão do Copom: {data_ultima}"
+        else:
+            selic_subtext = "Δ vs última decisão do Copom"
 
         metric_card(
-            "Selic meta",
-            selic_atual,
-            selic_delta,
+            label="Selic meta vs última decisão do Copom",
+            value=selic_atual,
+            delta=selic_delta,
             fmt_value="{:.2f}",
-            value_is_pct=False,   # igual ao bloco de Curto Prazo (15,00 – sem %)
-            delta_is_pp=True,
-            badge="vs Copom",     # pill igual: VS COPOM
+            value_is_pct=False,   # 15,00 sem símbolo de %
+            delta_is_pp=True,     # delta em p.p.
+            badge=badge_selic,
             icon_html=ICON_PERCENT,
             subtext=selic_subtext,
         )
@@ -2478,20 +2903,15 @@ def render_bloco_termometro_macro_br() -> None:
             getattr(ativos, "di_5_anos_delta_ano", None) if ativos is not None else None
         )
 
+        # título no padrão pedido: "DI1N29 (B3) vs d-1"
         if di5_ticker:
-            titulo_di5 = f"{di5_ticker} (B3)"
+            titulo_di5 = f"{di5_ticker} (B3) vs d-1"
         else:
-            titulo_di5 = "DI Futuro ~5 anos (B3)"
+            titulo_di5 = "DI Futuro ~5 anos (B3) vs d-1"
 
-        if di5_delta is None:
-            badge_di5 = None
-        else:
-            if di5_fonte == "intraday":
-                badge_di5 = "Δ p.p. no dia (B3)"
-            elif di5_fonte == "d-1":
-                badge_di5 = "Δ p.p. vs D-1"
-            else:
-                badge_di5 = "vs D-1"
+        # badge no canto direito: data de referência da curva DI (última data do histórico)
+        di5_referencia = obter_referencia_di_futuro()
+        badge_di5 = di5_referencia or "VS D-1"
 
         subtext_di5 = None
         if di5_delta_ano is not None:
@@ -2570,13 +2990,13 @@ def render_bloco_termometro_macro_br() -> None:
             )
 
         metric_card(
-            label="IBC-Br – nível / variação",
+            label="IBC-Br – nível / variação M-1",
             value=ibc_nivel,           # nível atual (série SA)
             delta=ibc_var_mom,         # m/m dessaz. → pílula
             fmt_value="{:.2f}",
             value_is_pct=False,
             delta_is_pct=True,         # delta em %
-            badge="vs m-1",            # seta = mês vs mês anterior
+            badge=ibc_ref,             # seta = mês vs mês anterior
             icon_html=ICON_CHART,
             subtext=subtext_ibc,       # "3m (dessaz.): ... | a/a (sem ajuste): ..."
         )
@@ -2590,33 +3010,105 @@ def render_bloco_termometro_macro_br() -> None:
     # =====================================================
     col5, col6, col7, col8 = st.columns(4)
 
-    # 5) Confiança da Indústria (mock)
+    # 5) Emprego formal – saldo (mês vs a/a, com média 5 anos)
     with col5:
-        metric_card(
-            label="Confiança da Indústria (ICI)",
-            value=98.3,
-            delta=1.2,
-            fmt_value="{:.1f}",
-            value_is_pct=False,
-            delta_is_pct=False,
-            badge="Exemplo – FGV",
-            icon_html=ICON_CHART,
-            subtext="Acima de 100 = otimismo; abaixo, pessimismo (EXEMPLO).",
-        )
+        resumo_caged = resumo_caged_saldo_novo()
 
-    # 6) Taxa de Desemprego – PNAD (mock)
+        saldo_atual = resumo_caged.get("saldo_atual")
+        delta_12m = resumo_caged.get("delta_12m")
+        media_mes_5anos = resumo_caged.get("media_mes_5anos")
+        ref_caged = resumo_caged.get("referencia") or "-"
+
+        if saldo_atual is None:
+            metric_card(
+                label="Emprego formal – saldo (mês vs a/a)",
+                value=0.0,
+                delta=0.0,
+                fmt_value="{:.0f}",
+                value_is_pct=False,
+                delta_is_pct=False,
+                badge="Sem dados CAGED",
+                icon_html=ICON_CHART,
+                subtext="Não foi possível carregar o Novo Caged (Ipeadata).",
+            )
+        else:
+            # saldo e delta em MIL vagas
+            valor_mil = saldo_atual / 1000.0
+            delta_mil = (
+                round(delta_12m / 1000.0, 0) if delta_12m is not None else 0.0
+            )
+
+            media_5anos_mil = (
+                media_mes_5anos / 1000.0 if media_mes_5anos is not None else None
+            )
+
+            if media_5anos_mil is not None:
+                subtext_caged = (
+                    f"Média deste mês nos últimos 5 anos: "
+                    f"{media_5anos_mil:.0f} mil."
+                )
+            else:
+                subtext_caged = "Saldo mensal de vagas formais. Δ vs mesmo mês há 12m."
+
+            metric_card(
+                label="Emprego formal – saldo (mês vs a/a)",
+                value=valor_mil,                 # ex.: 85 -> "85 mil"
+                delta=delta_mil,                 # ex.: -48
+                fmt_value="{:.0f} mil",
+                value_is_pct=False,
+                delta_is_pct=False,              # delta não é %, é nível
+                badge=ref_caged,                 # "10/2025", etc.
+                icon_html=ICON_CHART,
+                subtext=subtext_caged,           # texto da média 5 anos
+                delta_is_money=True,             # ativa modo dinheiro
+                delta_money_prefix="R$ ",
+                delta_money_suffix=" mil",
+                delta_money_decimals=0,
+            )
+
+
+
+
+    # 6) Taxa de Desemprego – PNAD Contínua (trimestre móvel, dados reais)
     with col6:
-        metric_card(
-            label="Desemprego – PNAD Contínua",
-            value=7.8,
-            delta=-0.2,
-            fmt_value="{:.1f}",
-            value_is_pct=True,
-            delta_is_pp=True,
-            badge="Exemplo – 3m móvel",
-            icon_html=ICON_PERCENT,
-            subtext="Queda de 0,2 p.p. em 12 meses (EXEMPLO).",
-        )
+        desemp_atual = getattr(dados_macro, "desemprego_pnad", None)
+
+        # Se por algum motivo não carregou a PNAD, mostra um fallback
+        if desemp_atual is None:
+            metric_card(
+                label="Desemprego – PNAD Contínua (trimestre móvel, %)",
+                value=0.0,
+                delta=0.0,
+                fmt_value="{:.1f}",
+                value_is_pct=True,
+                delta_is_pp=True,
+                badge="Sem dados PNAD",
+                icon_html=ICON_PERCENT,
+                subtext="Não foi possível carregar a PNAD Contínua do SIDRA.",
+            )
+        else:
+            desemp_delta = dados_macro.desemprego_delta_pp_12m or 0.0
+            desemp_12m = dados_macro.desemprego_pnad_12m_atras
+            desemp_24m = dados_macro.desemprego_pnad_24m_atras
+
+            partes_subtexto = []
+            if desemp_12m is not None:
+                partes_subtexto.append(f"há 12m: {desemp_12m:.1f}%")
+            if desemp_24m is not None:
+                partes_subtexto.append(f"há 24m: {desemp_24m:.1f}%")
+            subtexto = " | ".join(partes_subtexto)
+
+            metric_card(
+                label="Desemprego – PNAD Contínua (trimestre móvel, %)",
+                value=desemp_atual,
+                delta=desemp_delta,
+                fmt_value="{:.1f}",
+                value_is_pct=True,
+                delta_is_pp=True,  # delta é em p.p.
+                badge=dados_macro.desemprego_pnad_referencia or "PNAD – tri móvel",
+                icon_html=ICON_PERCENT,
+                subtext=subtexto,
+            )
 
     # 7) Câmbio BRL/USD (PTAX) – mesmo visual do Curto Prazo
     with col7:
@@ -2640,14 +3132,17 @@ def render_bloco_termometro_macro_br() -> None:
             fx_parts.append("24m: " + _format_delta_br(ptax_var_24m, 2) + "%")
         fx_subtext = " | ".join(fx_parts) if fx_parts else None
 
+        # badge = data de referência da PTAX (dd/mm/aaaa)
+        badge_ptax = obter_referencia_ptax() or "-"
+
         metric_card(
-            "PTAX – dólar (R$)",
+            "PTAX – dólar (R$) – intraday",
             ptax,
             ptax_var_dia,
             fmt_value="R$ {:.2f}",
             value_is_pct=False,
             delta_is_pct=True,   # variação em %
-            badge="intraday",
+            badge=badge_ptax,    # dd/mm/aaaa
             icon_html=ICON_DOLLAR,
             subtext=fx_subtext,
         )
@@ -2680,14 +3175,17 @@ def render_bloco_termometro_macro_br() -> None:
             ibov_parts.append("ano: " + _format_delta_br(ibov_var_ano_val, 2) + "%")
         ibov_subtext = " | ".join(ibov_parts) if ibov_parts else None
 
+        # badge = data do último fechamento (dd/mm/aaaa)
+        ibov_referencia = obter_referencia_ibovespa() or "-"
+
         metric_card(
-            "Ibovespa – pts",
+            "Ibovespa – pts – VS D-1",
             valor_ibov,
             delta_ibov,
             fmt_value="{:,.2f}",
             value_is_pct=False,
             delta_is_pct=True,
-            badge="vs D-1",
+            badge=ibov_referencia,   # dd/mm/aaaa
             icon_html=ICON_CHART,
             subtext=ibov_subtext,
         )
@@ -2700,19 +3198,55 @@ def render_bloco_termometro_macro_br() -> None:
     # =====================================================
     col9, col10, col11, col12 = st.columns(4)
 
-    # 9) CDS Brasil 5 anos (mock)
+    # 9) Risco-Brasil – spread soberano (10Y BR – 10Y US)
     with col9:
-        metric_card(
-            label="CDS Brasil 5 anos",
-            value=150,
-            delta=-10.0,
-            fmt_value="{:.0f}",
-            value_is_pct=False,
-            delta_is_pct=False,
-            badge="Exemplo – 12m",
-            icon_html=ICON_CHART,
-            subtext="Queda de 10 p.b. em 12 meses (EXEMPLO).",
-        )
+        (
+            risco_nivel,
+            risco_delta_aa,
+            risco_ref,
+            risco_media_12m,
+            risco_delta_d1,
+            risco_inicio_mes,
+            risco_data_inicio_mes,
+        ) = carregar_risco_brasil_spread_10y()
+
+        if risco_nivel is None:
+            metric_card(
+                label="Risco-Brasil – spread 10Y (proxy risco-país)",
+                value=0.0,
+                delta=0.0,
+                fmt_value="{:.0f}",
+                value_is_pct=False,
+                delta_is_pct=False,
+                badge="sem dados",
+                icon_html=ICON_CHART,
+                subtext="Não foi possível carregar o spread 10Y Brasil local – US10Y.",
+            )
+        else:
+            # texto enxuto: apenas início do mês em p.b.
+            if risco_inicio_mes is not None:
+                subtext_spread = f"Início do mês: {risco_inicio_mes:.0f} p.b."
+            else:
+                subtext_spread = None
+
+            metric_card(
+                label="Risco-País – spread 10Y (Brasil/USA)",
+                value=risco_nivel,
+                # setinha: variação D-1 em p.b.
+                delta=risco_delta_d1 or 0.0,
+                fmt_value="{:.0f}",      # número grande só "917"
+                value_is_pct=False,
+                delta_is_pct=False,
+                badge=risco_ref or "",
+                icon_html=ICON_CHART,
+                subtext=subtext_spread,  # "Início do mês: 928 p.b."
+                # força o sufixo " p.b." na pílula do delta
+                delta_is_money=True,
+                delta_money_prefix="",
+                delta_money_suffix=" p.b.",
+                delta_money_decimals=2,
+            )
+
 
     # 10) Dívida Bruta GG (% PIB) – dados reais
     with col10:
@@ -2733,66 +3267,127 @@ def render_bloco_termometro_macro_br() -> None:
             )
 
         metric_card(
-            label="Dívida Bruta GG (% PIB)",
-            value=divida_nivel,            # nível atual, ex.: 78,6%
-            delta=divida_delta_12m,        # Δ m/m em p.p.
+            label="Dívida Bruta GG – nível (% PIB, Δ a/a em p.p.)",
+            value=divida_nivel,        # ex.: 78,6% do PIB
+            delta=divida_delta_aa,     # Δ vs mesmo mês do ano anterior, em p.p.
             fmt_value="{:.1f}",
-            value_is_pct=True,
-            delta_is_pp=True,
-            badge="vs m-1",                # indica que é mês vs mês anterior
+            value_is_pct=True,         # valor grande em %
+            delta_is_pp=True,          # seta em p.p. (não %)
+            badge=badge_divida,        # ex.: "10/2025"
             icon_html=ICON_PERCENT,
-            subtext=subtext_divida,        # "há 12m: ... | há 24m: ..."
+            subtext=subtext_divida,    # "há 12m: ... | há 24m: ..."
         )
 
+
+    # 11) Resultado Primário GC – mês (R$ bi, vs a/a)
     with col11:
-        partes_prim = []
+        dm = dados_macro
 
-        # variação nominal a/a do mês
-        if receita_real_var_aa_pct is not None:
-            partes_prim.append(
-                f"Nominal a/a (mês): {receita_real_var_aa_pct:+.1f}%"
-            )
+        # número grande: resultado primário do mês (R$ bi)
+        prim_mes = dm.primario_mes_real_bi
 
-        # saldo 12m nominal
-        if primario_ano_real_bi is not None:
-            txt_12m = f"Saldo 12m: {primario_ano_real_bi:+.1f} bi"
-            if primario_ano_real_bi_prev is not None:
-                txt_12m += f" (vs {primario_ano_real_bi_prev:+.1f} bi)"
-            partes_prim.append(txt_12m)
+        # setinha: diferença em R$ bi vs MESMO mês do ano anterior
+        prim_delta_bi_aa = dm.primario_mes_delta_real_bi_aa
 
-        if partes_prim:
-            subtext_prim = " | ".join(partes_prim)
+        # acumulado no ano (jan → mês de referência)
+        prim_acum_ano = dm.primario_ano_real_bi
+
+        # referência do mês (vem como "10/25" e convertemos para "10/2025")
+        prim_ref = getattr(dm, "primario_referencia", None)
+
+        badge_prim = "ano fiscal"
+        if prim_ref is not None:
+            if isinstance(prim_ref, str):
+                # tenta converter de MM/YY -> MM/YYYY
+                try:
+                    dt_prim = datetime.strptime(prim_ref, "%m/%y")
+                    badge_prim = dt_prim.strftime("%m/%Y")
+                except ValueError:
+                    # se não bater o formato, usa do jeito que veio
+                    badge_prim = prim_ref
+            else:
+                badge_prim = str(prim_ref)
+
+        # subtexto bem curto, pra não aumentar a altura do card
+        if prim_acum_ano is not None:
+            if prim_acum_ano >= 0:
+                subtext_prim = f"Acum. no ano: superávit de R$ {prim_acum_ano:,.1f} bi."
+            else:
+                subtext_prim = f"Acum. no ano: déficit de R$ {abs(prim_acum_ano):,.1f} bi."
+
+
         else:
-            subtext_prim = (
-                "Resultado primário calculado com série 10.04.1 do Tesouro."
-            )
+            subtext_prim = "Acum. no ano indisponível."
 
         metric_card(
-            label="Resultado Primário – Governo Central (mês, valores correntes)",
-            value=primario_mes_real_bi,          # ex.: 37.1 -> R$ 37,1 bi
-            delta=primario_mes_delta_real_bi_aa, # ex.: +4.1 -> R$ +4,1 bi vs mesmo mês a/a
-            fmt_value="R$ {:.1f} bi",
-            value_is_pct=False,
-            delta_is_pp=False,                   # delta em R$ bi
-            badge="vs mês a/a (nominal)",        # agora está honesto
-            icon_html=ICON_PERCENT,
-            subtext=subtext_prim,
-        )
-
-
-    # 12) Balança Comercial 12m (US$ bi) – mock
-    with col12:
-        metric_card(
-            label="Balança Comercial 12m (US$ bi)",
-            value=60.0,
-            delta=-5.0,
-            fmt_value="{:.1f}",
+            label="Resultado Primário Governo – mês vs a/a",
+            value=prim_mes,
+            delta=prim_delta_bi_aa,        # Δ em R$ bi vs mesmo mês do ano anterior
+            fmt_value="R$ {:,.1f} bi",
             value_is_pct=False,
             delta_is_pct=False,
-            badge="Exemplo – 12m",
+            delta_is_money=True,           # <<--- aqui
+            badge=badge_prim,              # ex.: 10/25
             icon_html=ICON_DOLLAR,
-            subtext="Superávit de US$ 60 bi em 12m (EXEMPLO).",
+            subtext=subtext_prim,          # "Acum. no ano: déficit de R$ 63,7 bi."
         )
+
+
+
+    # 12) Balança Comercial - mês vs a/a  (US$ bi)
+    with col12:
+        resumo_balanca = resumo_balanca_comercial_mensal()
+
+        saldo_mes = resumo_balanca.get("saldo_mes_bi")
+        var_mes_pct_aa = resumo_balanca.get("var_mes_pct_aa")
+        acum_ano_bi = resumo_balanca.get("acum_ano_bi")
+        acum_ano_var_pct = resumo_balanca.get("acum_ano_var_pct")
+        ref_bal = resumo_balanca.get("referencia") or "-"
+
+        if saldo_mes is None:
+            metric_card(
+                label="Balança Comercial - mês vs a/a  (US$ bi)",
+                value=0.0,
+                delta=0.0,
+                fmt_value="US$ {:,.1f} bi",
+                value_is_pct=False,
+                delta_is_pct=False,
+                badge="sem dados",
+                icon_html=ICON_DOLLAR,
+                subtext="Não foi possível carregar a balança comercial (ver CSV).",
+            )
+        else:
+            # texto pequeno: acumulado no ano + % vs mesmo período do ano anterior
+            if acum_ano_bi is not None:
+                valor_abs = abs(acum_ano_bi)
+                if acum_ano_var_pct is not None:
+                    sinal = "+" if acum_ano_var_pct >= 0 else "-"
+                    pct_abs = abs(acum_ano_var_pct)
+                    # Ex.: "Acum. ano: US$ 45,6 bi (-18,1% a/a)."
+                    subtext_bal = (
+                        f"Acum. ano: US$ {valor_abs:,.1f} bi ({sinal}{pct_abs:.1f}% a/a)."
+                    )
+                else:
+                    # Ex.: "Acum. ano: US$ 45,6 bi."
+                    subtext_bal = f"Acum. ano: US$ {valor_abs:,.1f} bi."
+
+            else:
+                subtext_bal = "Acum. no ano indisponível."
+
+            delta_val = var_mes_pct_aa if var_mes_pct_aa is not None else 0.0
+            delta_is_pct_flag = var_mes_pct_aa is not None
+
+            metric_card(
+                label="Balança Comercial - mês vs a/a  (US$ bi)",
+                value=saldo_mes,                  # ex.: US$ 5,8 bi
+                delta=delta_val,                  # var % vs mesmo mês do ano anterior
+                fmt_value="US$ {:,.1f} bi",
+                value_is_pct=False,
+                delta_is_pct=delta_is_pct_flag,   # seta em %
+                badge=ref_bal,                    # badge = mm/aaaa
+                icon_html=ICON_DOLLAR,
+                subtext=subtext_bal,
+            )
 
 
 def render_bloco1_observatorio_mercado(
@@ -3655,13 +4250,12 @@ def atualizar_dados_externos():
     Atualiza os dados que ficam salvos em CSV fora do app principal:
     - Curvas ANBIMA (prefixada, DI, IPCA+)
     - Histórico dos contratos DI Futuro (B3)
-
-    Se alguma chamada der erro, a exceção sobe para quem chamou.
+    - Spread 10Y Brasil local – US10Y (CSV para o card de risco-país)
     """
-    # Se ANBIMA ou DI Futuro falharem, vamos deixar a exceção subir.
-    # O tratamento (warning) será feito na camada de cache.
     atualizar_todas_as_curvas()
     atualizar_historico_di_futuro()
+    atualizar_spread_10y()
+
 
 @st.cache_data(ttl=86400)  # 86400 segundos = 24 horas
 def atualizar_dados_externos_cache(chave_dia: str) -> bool:
