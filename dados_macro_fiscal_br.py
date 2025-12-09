@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import logging
 import datetime as dt
-
+from io import BytesIO
+from typing import Optional, Tuple
 import pandas as pd
 import requests
-
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Caminho base e CSV da Dívida Bruta
+BASE_DIR = Path(__file__).parent
+CSV_DIVIDA_BRUTA = BASE_DIR / "data" / "fiscal" / "divida_bruta_pct_pib.csv"
+
+# CSV do Resultado Primário – Governo Central (R$ bi nominais)
+CSV_RESULTADO_PRIMARIO = BASE_DIR / "data" / "fiscal" / "resultado_primario_gc_bi.csv"
 
 
 # =============================================================================
@@ -55,8 +62,6 @@ class DadosMacroFiscalBr:
     receita_real_var_aa_pct: Optional[float] = None         # var nominal a/a (%) do primário do mês
     despesa_real_var_aa_pct: Optional[float] = None         # reservado p/ futuro
     primario_ano_real_bi: Optional[float] = None            # acumulado no ano até o mês (R$ bi)
-    primario_ano_real_bi_prev: Optional[float] = None       # acumulado no ano até o mesmo mês do ano anterior (R$ bi)
-    primario_ano_real_bi: Optional[float] = None            # saldo 12m nominal (R$ bi)
     primario_ano_real_bi_prev: Optional[float] = None       # saldo 12m nominal 12m a
     primario_referencia: Optional[str] = None               # ex.: "10/2025"
 
@@ -102,6 +107,54 @@ def _baixar_serie_sgs_json(codigo: int, n_ultimos: int = 24) -> pd.DataFrame:
 
     # ordena cronologicamente e pega só os N últimos
     df = df.sort_values("data").tail(n_ultimos).reset_index(drop=True)
+    return df
+
+def atualizar_divida_bruta_csv(n_ultimos: int = 240) -> pd.DataFrame:
+    """
+    Baixa a série de Dívida Bruta GG (% PIB) do SGS
+    e atualiza o CSV usado pelo painel.
+
+    Arquivo gerado:
+      data/fiscal/divida_bruta_pct_pib.csv
+    """
+    codigo_divida = 13762  # DBGG (% PIB)
+
+    df = _baixar_serie_sgs_json(codigo_divida, n_ultimos=n_ultimos)
+
+    # garante diretório
+    CSV_DIVIDA_BRUTA.parent.mkdir(parents=True, exist_ok=True)
+
+    df.to_csv(CSV_DIVIDA_BRUTA, index=False)
+
+    logger.info(
+        "CSV de Dívida Bruta GG atualizado (%d linhas) em %s",
+        len(df),
+        CSV_DIVIDA_BRUTA,
+    )
+
+    return df
+
+def atualizar_resultado_primario_csv() -> pd.DataFrame:
+    """
+    Baixa a série de Resultado Primário do Governo Central (10.04.1),
+    trata e atualiza o CSV usado pelo painel.
+
+    Arquivo gerado:
+      data/fiscal/resultado_primario_gc_bi.csv
+    """
+    df = _baixar_resultado_primario_df()
+    if df is None or df.empty:
+        raise RuntimeError("Não foi possível atualizar o CSV de Resultado Primário.")
+
+    CSV_RESULTADO_PRIMARIO.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(CSV_RESULTADO_PRIMARIO, index=False)
+
+    logger.info(
+        "CSV de Resultado Primário GC atualizado (%d linhas) em %s",
+        len(df),
+        CSV_RESULTADO_PRIMARIO,
+    )
+
     return df
 
 
@@ -197,16 +250,63 @@ def _carregar_divida_bruta() -> tuple[
     - nível há 12 meses
     - nível há 24 meses
     - referência 'mm/aaaa'
+
+    Versão offline-first:
+    - 1ª tentativa: ler CSV_DIVIDA_BRUTA (gerado pelo job diário);
+    - Fallback: baixar da API SGS e (opcionalmente) regravar o CSV.
     """
     codigo_divida = 13762  # DBGG (% PIB)
 
+    # 1) tenta usar o CSV local
+    df: Optional[pd.DataFrame] = None
     try:
-        df = _baixar_serie_sgs_json(codigo_divida, n_ultimos=240)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Erro ao baixar Dívida Bruta GG (SGS %s): %s", codigo_divida, exc)
-        return None, None, None, None, None
+        if CSV_DIVIDA_BRUTA.exists():
+            df = pd.read_csv(CSV_DIVIDA_BRUTA)
 
-    if len(df) < 2:
+            # normaliza tipos
+            if "data" in df.columns:
+                df["data"] = pd.to_datetime(df["data"], errors="coerce")
+            if "valor" in df.columns:
+                df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
+
+            df = (
+                df.dropna(subset=["data", "valor"])
+                  .sort_values("data")
+                  .reset_index(drop=True)
+            )
+    except Exception as exc:
+        logger.warning(
+            "Erro ao ler CSV de Dívida Bruta (%s): %s",
+            CSV_DIVIDA_BRUTA,
+            exc,
+        )
+        df = None
+
+    # 2) se não deu pra usar o CSV, cai para a API SGS (fallback)
+    if df is None or df.empty:
+        try:
+            df = _baixar_serie_sgs_json(codigo_divida, n_ultimos=240)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Erro ao baixar Dívida Bruta GG (SGS %s): %s",
+                codigo_divida,
+                exc,
+            )
+            return None, None, None, None, None
+
+        # tenta salvar de volta no CSV, mas sem travar se der erro
+        try:
+            CSV_DIVIDA_BRUTA.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(CSV_DIVIDA_BRUTA, index=False)
+        except Exception as exc:
+            logger.warning(
+                "Não consegui atualizar CSV de Dívida Bruta em %s: %s",
+                CSV_DIVIDA_BRUTA,
+                exc,
+            )
+
+    # a partir daqui, df deve estar ok
+    if df is None or len(df) < 2:
         return None, None, None, None, None
 
     df = df.sort_values("data").reset_index(drop=True)
@@ -236,6 +336,7 @@ def _carregar_divida_bruta() -> tuple[
     nivel_24m = float(df_24m.iloc[-1]["valor"]) if not df_24m.empty else None
 
     return nivel, delta_mom, nivel_12m, nivel_24m, ref_str
+
 
 def _carregar_desemprego_pnad() -> tuple[
     Optional[float],
@@ -319,15 +420,6 @@ def _carregar_desemprego_pnad() -> tuple[
     return taxa_atual, delta_pp_aa, taxa_12m, taxa_24m, referencia
 
 
-from io import BytesIO
-from typing import Optional, Tuple
-
-import pandas as pd
-import requests
-import logging
-
-logger = logging.getLogger(__name__)
-
 URL_TESOURO_RESULTADO_PRIMARIO = (
     "https://series-temporais-externo-frontend.tesouro.gov.br/"
     "backend-series-temporais/rest/Public/SerieGrafico/Download/8055"
@@ -348,43 +440,27 @@ PNAD_TAXA_DESOCUPACAO_URL = (
     "t/6381/n1/1/v/4099/p/all/d/v4099%201?formato=json"
 )
 
-
-def _carregar_resultado_primario_real_ipea_style() -> Tuple[
-    Optional[float],
-    Optional[float],
-    Optional[float],
-    Optional[float],
-    Optional[float],
-    Optional[float],
-    Optional[str],   # 6) mês de referência, ex.: "10/2025"
-]:
-
+def _baixar_resultado_primario_df() -> Optional[pd.DataFrame]:
     """
-    Versão simplificada: Resultado Primário do Governo Central em
-    valores NOMINAIS (R$ bi), usando a série 10.04.1 do Tesouro.
+    Baixa a série 10.04.1 (Resultado Primário GC) do Tesouro,
+    faz toda a limpeza e devolve um DataFrame com:
 
-    Retorna:
-      0) primário do mês em R$ bi (corrente)
-      1) delta em R$ bi vs mesmo mês do ano anterior
-      2) variação nominal a/a (%) do primário do mês
-      3) (reservado para futuro) -> None
-      4) saldo 12m (R$ bi, nominal)
-      5) saldo 12m 12m atrás (R$ bi, nominal)
+      - data      (datetime64[ns])
+      - valor_bi  (R$ bilhões NOMINAIS)
+
+    Esse helper é usado tanto pelo job diário (atualizar CSV)
+    quanto pelo loader offline-first.
     """
-    # ---------------------------
-    # 1) Baixa a série do Tesouro
-    # ---------------------------
     try:
         resp = requests.get(URL_TESOURO_RESULTADO_PRIMARIO, timeout=30)
         resp.raise_for_status()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Erro ao baixar série de resultado primário do Tesouro (%s): %s",
             URL_TESOURO_RESULTADO_PRIMARIO,
             exc,
         )
-        return (None, None, None, None, None, None, None)
-
+        return None
 
     try:
         # deixa o pandas descobrir o separador (; , ou tab)
@@ -394,15 +470,17 @@ def _carregar_resultado_primario_real_ipea_style() -> Tuple[
             engine="python",
             encoding="latin-1",
         )
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
         logger.exception(
-            "Erro ao ler arquivo de resultado primário (CSV Tesouro)."
+            "Erro ao ler arquivo de resultado primário (CSV Tesouro): %s",
+            exc,
         )
-        return (None, None, None, None, None, None, None)
+        return None
 
     if df_prim.empty:
-        logger.error("CSV do Tesouro veio vazio ou ilegível.")
-        return (None, None, None, None, None, None, None)
+        logger.error("CSV do Tesouro veio vazio ou ilegível (resultado primário).")
+        return None
+
     # ---------------------------
     # 2) Seleciona colunas certas (Data / Valor)
     # ---------------------------
@@ -410,10 +488,10 @@ def _carregar_resultado_primario_real_ipea_style() -> Tuple[
 
     if "Data" not in df_prim.columns or "Valor" not in df_prim.columns:
         logger.error(
-            "CSV do Tesouro sem colunas 'Data'/'Valor': %s",
+            "CSV do Tesouro sem colunas 'Data'/'Valor' (resultado primário): %s",
             list(df_prim.columns),
         )
-        return (None, None, None, None, None, None, None)
+        return None
 
     df_prim = df_prim[["Data", "Valor"]].copy()
     df_prim.rename(
@@ -424,9 +502,9 @@ def _carregar_resultado_primario_real_ipea_style() -> Tuple[
     # normaliza texto bruto da coluna de valores
     val_raw = df_prim["valor_milhoes"].astype(str).str.strip()
 
-    # trata formato com vírgula/ponto (suporta tanto '36526,68' quanto '36526.68')
+    # trata formato com vírgula/ponto (suporta tanto '36526,68' quanto '36.526,68')
     tem_virgula = val_raw.str.contains(",", regex=False)
-    tem_ponto   = val_raw.str.contains(r"\.", regex=True)
+    tem_ponto = val_raw.str.contains(r"\.", regex=True)
 
     # caso 1: tem vírgula e ponto -> típico "36.526,68" (ponto milhar, vírgula decimal)
     mask_milhar = tem_virgula & tem_ponto
@@ -446,62 +524,133 @@ def _carregar_resultado_primario_real_ipea_style() -> Tuple[
     # demais casos (já com ponto decimal ou número limpo) ficam como estão
     df_prim["valor_milhoes"] = val_norm
 
-
     # ---------------------------
     # 3) Converte tipos
     # ---------------------------
-    # tira espaços
     df_prim["data"] = df_prim["data"].astype(str).str.strip()
-
-    # datas no formato dd/mm/aaaa (01/10/2025 etc.)
     df_prim["data"] = pd.to_datetime(
         df_prim["data"],
         format="%d/%m/%Y",
         errors="coerce",
     )
 
-    # converte de fato para número (milhões)
     df_prim["valor_milhoes"] = pd.to_numeric(
         df_prim["valor_milhoes"],
         errors="coerce",
     )
 
-    # remove só linhas realmente inválidas
     df_prim = df_prim.dropna(subset=["data", "valor_milhoes"])
     if df_prim.empty:
         logger.error(
-            "Após conversão, nenhuma linha válida em data/valor_milhoes."
+            "Após conversão, nenhuma linha válida em data/valor_milhoes (resultado primário)."
         )
-        return (None, None, None, None, None, None, None)
-    
-    df_prim = df_prim.sort_values("data")
+        return None
+
+    df_prim = df_prim.sort_values("data").reset_index(drop=True)
 
     # ---------------------------
     # 4) Converte para R$ bi NOMINAIS
     # ---------------------------
     df_prim["valor_bi"] = df_prim["valor_milhoes"] / 1000.0
 
-    # ---------------------------
-    # 5) Calcula métricas nominais
-    # ---------------------------
-    ult = df_prim.iloc[-1]
+    # devolve só o essencial pro resto do código
+    return df_prim[["data", "valor_bi"]].copy()
+
+
+def _carregar_resultado_primario_real_ipea_style() -> Tuple[
+    Optional[float],
+    Optional[float],
+    Optional[float],
+    Optional[float],
+    Optional[float],
+    Optional[float],
+    Optional[str],   # 6) mês de referência, ex.: "10/2025"
+]:
+    """
+    Resultado Primário do Governo Central em valores NOMINAIS (R$ bi),
+    usando a série 10.04.1 do Tesouro.
+
+    Retorna:
+      0) primário do mês em R$ bi (corrente)
+      1) delta em R$ bi vs mesmo mês do ano anterior
+      2) variação nominal a/a (%) do primário do mês
+      3) (reservado para futuro) -> None
+      4) acumulado no ano até o mês de ref (R$ bi)  [reuso do campo "12m"]
+      5) mesmo acumulado, mas para o ano anterior   [reuso do campo "12m atrás"]
+      6) mês de referência (string "mm/aa", ex.: "10/25")
+    """
+
+    df: Optional[pd.DataFrame] = None
+
+    # 1) Tenta carregar do CSV local (modo rápido / offline-first)
+    try:
+        if CSV_RESULTADO_PRIMARIO.exists():
+            df = pd.read_csv(CSV_RESULTADO_PRIMARIO)
+
+            # normaliza tipos
+            if "data" in df.columns:
+                df["data"] = pd.to_datetime(df["data"], errors="coerce")
+
+            if "valor_bi" in df.columns:
+                df["valor_bi"] = pd.to_numeric(df["valor_bi"], errors="coerce")
+
+            # compatibilidade: se no futuro o CSV tiver outra coluna de valor
+            if "valor_bi" not in df.columns and "valor" in df.columns:
+                df["valor_bi"] = pd.to_numeric(df["valor"], errors="coerce")
+
+            df = (
+                df.dropna(subset=["data", "valor_bi"])
+                  .sort_values("data")
+                  .reset_index(drop=True)
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Erro ao ler CSV de Resultado Primário (%s): %s",
+            CSV_RESULTADO_PRIMARIO,
+            exc,
+        )
+        df = None
+
+    # 2) Se não deu pra usar o CSV, cai para a API do Tesouro (fallback)
+    if df is None or df.empty:
+        df = _baixar_resultado_primario_df()
+        if df is None or df.empty:
+            return (None, None, None, None, None, None, None)
+
+        # tenta salvar/atualizar o CSV, mas sem travar se der erro
+        try:
+            CSV_RESULTADO_PRIMARIO.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(CSV_RESULTADO_PRIMARIO, index=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Não consegui atualizar CSV de Resultado Primário em %s: %s",
+                CSV_RESULTADO_PRIMARIO,
+                exc,
+            )
+
+    # a partir daqui, df deve ter pelo menos 2 linhas válidas
+    if df is None or len(df) < 2:
+        return (None, None, None, None, None, None, None)
+
+    df = df.sort_values("data").reset_index(drop=True)
+
+    # último mês disponível
+    ult = df.iloc[-1]
     data_ult = ult["data"]
     prim_mes_bi = float(ult["valor_bi"])
-    
+
     # mês de referência para o card (formato curto mm/aa, ex.: "10/25")
     if pd.notna(data_ult):
         prim_ref_str = data_ult.strftime("%m/%y")
     else:
         prim_ref_str = None
 
-
-
     # mesmo mês do ano anterior
     mask_aa = (
-        (df_prim["data"].dt.month == data_ult.month)
-        & (df_prim["data"].dt.year == data_ult.year - 1)
+        (df["data"].dt.month == data_ult.month)
+        & (df["data"].dt.year == data_ult.year - 1)
     )
-    df_aa = df_prim.loc[mask_aa]
+    df_aa = df.loc[mask_aa]
 
     if df_aa.empty:
         prim_mes_bi_aa = None
@@ -516,45 +665,44 @@ def _carregar_resultado_primario_real_ipea_style() -> Tuple[
         var_aa_pct = None
 
     # acumulado no ano-calendário (jan até o mês de referência)
-    ano_ref = data_ult.year
-    mes_ref = data_ult.month
+    ano_ref = int(data_ult.year)
+    mes_ref = int(data_ult.month)
 
     # ano atual: de janeiro até o mês de referência
     mask_ano_atual = (
-        (df_prim["data"].dt.year == ano_ref)
-        & (df_prim["data"].dt.month <= mes_ref)
+        (df["data"].dt.year == ano_ref)
+        & (df["data"].dt.month <= mes_ref)
     )
-    serie_ano_atual = df_prim.loc[mask_ano_atual, "valor_bi"]
+    serie_ano_atual = df.loc[mask_ano_atual, "valor_bi"]
 
     if serie_ano_atual.empty:
-        prim_12m_bi = None  # vamos reutilizar o campo como "acum_ano"
+        prim_acum_ano = None
     else:
-        prim_12m_bi = float(serie_ano_atual.sum())
+        prim_acum_ano = float(serie_ano_atual.sum())
 
     # ano anterior: de janeiro até o MESMO mês do ano anterior
     mask_ano_aa = (
-        (df_prim["data"].dt.year == ano_ref - 1)
-        & (df_prim["data"].dt.month <= mes_ref)
+        (df["data"].dt.year == ano_ref - 1)
+        & (df["data"].dt.month <= mes_ref)
     )
-    serie_ano_aa = df_prim.loc[mask_ano_aa, "valor_bi"]
+    serie_ano_aa = df.loc[mask_ano_aa, "valor_bi"]
 
     if serie_ano_aa.empty:
-        prim_12m_bi_prev = None
+        prim_acum_ano_prev = None
     else:
-        prim_12m_bi_prev = float(serie_ano_aa.sum())
+        prim_acum_ano_prev = float(serie_ano_aa.sum())
 
-    # ---------------------------
-    # 6) Retorno nos 6 campos esperados
-    # ---------------------------
+    # 6) Retorno nos 7 campos esperados
     return (
         prim_mes_bi,        # 0) mês, R$ bi NOMINAL
         delta_bi_aa,        # 1) delta R$ bi vs mesmo mês a/a
         var_aa_pct,         # 2) var nominal a/a do mês (%)
         None,               # 3) reservado p/ futuro
-        prim_12m_bi,        # 4) saldo 12m nominal (R$ bi)
-        prim_12m_bi_prev,   # 5) saldo 12m 12m atrás (R$ bi)
-        prim_ref_str,       # 6) mês de referência, "10/2025"
+        prim_acum_ano,      # 4) "12m" reaproveitado como acumulado no ano
+        prim_acum_ano_prev, # 5) "12m atrás" = mesmo acumulado no ano anterior
+        prim_ref_str,       # 6) mês de referência, "10/25"
     )
+
 
 
 def _carregar_receita_despesa_nominal() -> Tuple[

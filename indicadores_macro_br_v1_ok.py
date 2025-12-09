@@ -16,6 +16,8 @@ from functools import lru_cache
 from pathlib import Path
 from dados_macro_fiscal_br import carregar_dados_macro_fiscal_br
 from di_futuro_b3 import carregar_historico_di_futuro
+from caged_saldo_brasil import carregar_caged_saldo_csv, atualizar_caged_saldo_brasil_csv
+
 from risco_brasil_spread_10y import (
     atualizar_spread_10y, 
     carregar_risco_brasil_spread_10y,
@@ -33,19 +35,11 @@ from bloco_curto_prazo_br import (
 from dados_curto_prazo_br import carregar_dados_curto_prazo_br
 
 from curvas_anbima import (
-    atualizar_todas_as_curvas,
     montar_curva_anbima_hoje,
     montar_curva_anbima_variacoes,
 )
-from di_futuro_b3 import (
-    atualizar_historico_di_futuro,
-    carregar_historico_di_futuro,
-)
-
-from ibovespa_ipea import (
-    atualizar_historico_ibovespa,
-    carregar_historico_ibovespa,
-)
+from di_futuro_b3 import carregar_historico_di_futuro
+from ibovespa_ipea import carregar_historico_ibovespa
 
 from bloco_curto_prazo_br import (
     render_bloco_curto_prazo_br,
@@ -188,6 +182,9 @@ DATA_CURVAS_TESOURO_DIR = DATA_DIR / "curvas_tesouro"
 DATA_SETOR_EXTERNO_DIR = DATA_DIR / "setor_externo"
 BALANCA_COMERCIAL_CSV = DATA_SETOR_EXTERNO_DIR / "balanca_comercial_mensal_usd.csv"
 
+# Preços / Inflação
+DATA_PRECOS_DIR = DATA_DIR / "precos"
+IPCA_MENSAL_CSV = DATA_PRECOS_DIR / "ipca_mensal_ibge.csv"
 
 
 # =============================================================================
@@ -347,16 +344,94 @@ def buscar_selic_meta_aa() -> pd.DataFrame:
 
 
 def buscar_cdi_diario() -> pd.DataFrame:
-    """CDI diário (% a.d.), últimos 2 anos de dados."""
-    return buscar_serie_sgs(
+    """
+    CDI diário (% a.d.).
+
+    Versão offline-first para o SITE:
+    - Se existir o arquivo data/curto_prazo/cdi_diario.csv, usa esse CSV;
+    - Se não existir ou estiver ruim, cai para a API SGS (janela de 2 anos).
+    """
+
+    base_dir = Path(__file__).parent
+    caminho_csv = base_dir / "data" / "curto_prazo" / "cdi_diario.csv"
+
+    # 1) Tenta usar o CSV local (modo offline)
+    if caminho_csv.exists():
+        try:
+            df = pd.read_csv(caminho_csv)
+
+            # Garante tipos corretos
+            if "data" in df.columns:
+                df["data"] = pd.to_datetime(df["data"], errors="coerce")
+            if "valor" in df.columns:
+                df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
+
+            df = (
+                df.dropna(subset=["data", "valor"])
+                  .sort_values("data")
+                  .reset_index(drop=True)
+            )
+            return df
+        except Exception:
+            # Se der problema pra ler o CSV, cai pro modo online
+            pass
+
+    # 2) Fallback: busca na API SGS (comportamento antigo)
+    df = buscar_serie_sgs(
         SGS_SERIES["cdi_diario"],
         data_inicial=_dois_anos_atras_str(),
         data_final=_hoje_str(),
     )
 
+    # Garante o mesmo tratamento de tipos e ordenação
+    if not df.empty:
+        df["data"] = pd.to_datetime(df["data"], errors="coerce")
+        df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
+        df = (
+            df.dropna(subset=["data", "valor"])
+              .sort_values("data")
+              .reset_index(drop=True)
+        )
+
+    return df
+
+
 
 def buscar_ptax_venda() -> pd.DataFrame:
-    """Dólar PTAX - venda (R$/US$). Usa janela de 2 anos para variações."""
+    """
+    Dólar PTAX - venda (R$/US$).
+
+    Versão offline-first para o SITE:
+    - Se existir o arquivo data/curto_prazo/ptax_venda.csv, usa esse CSV;
+    - Se não existir ou der erro na leitura, cai para a API SGS (comportamento antigo).
+    """
+    base_dir = Path(__file__).parent
+    caminho_csv = base_dir / "data" / "curto_prazo" / "ptax_venda.csv"
+
+    # 1) Tenta usar o CSV salvo pelo dados_curto_prazo_br / atualiza_dados_pesados.py
+    if caminho_csv.exists():
+        try:
+            df = pd.read_csv(caminho_csv)
+
+            # garante tipos
+            if "data" in df.columns:
+                df["data"] = pd.to_datetime(df["data"], errors="coerce")
+            if "valor" in df.columns:
+                df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
+
+            df = (
+                df.dropna(subset=["data", "valor"])
+                  .sort_values("data")
+                  .reset_index(drop=True)
+            )
+
+            return df
+
+        except Exception:
+            # se der problema no CSV, volta pro modo online
+            pass
+
+    # 2) Fallback: busca direto na API SGS (como era antes)
     return buscar_serie_sgs(
         SGS_SERIES["ptax_venda"],
         data_inicial=_dois_anos_atras_str(),
@@ -448,8 +523,41 @@ def buscar_serie_mensal_ibge(
 
 
 def buscar_ipca_ibge() -> pd.DataFrame:
-    """IPCA - variação mensal (%)."""
+    """
+    IPCA - variação mensal (%).
+
+    Versão offline-first para o SITE:
+    - 1º tenta ler data/precos/ipca_mensal_ibge.csv (gerado pelo ipca_ibge.py);
+    - se não existir ou estiver zoado, cai para a API SIDRA (last60), igual antes.
+    """
+    # 1) Tenta usar o CSV local (modo offline)
+    try:
+        if IPCA_MENSAL_CSV.exists():
+            df = pd.read_csv(IPCA_MENSAL_CSV)
+
+            # garante tipos corretos
+            if "data" in df.columns:
+                df["data"] = pd.to_datetime(df["data"], errors="coerce")
+            if "valor" in df.columns:
+                df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
+
+            df = (
+                df[["data", "valor"]]
+                .dropna(subset=["data", "valor"])
+                .sort_values("data")
+                .drop_duplicates(subset=["data"], keep="last")
+                .reset_index(drop=True)
+            )
+
+            if not df.empty:
+                return df
+    except Exception:
+        # se der ruim na leitura do CSV, ignora e vai pro modo online
+        pass
+
+    # 2) Fallback: busca direto na API SIDRA (comportamento antigo)
     return buscar_serie_mensal_ibge(IBGE_TABELA_IPCA, IBGE_VARIAVEL_IPCA)
+
 
 
 def buscar_ipca15_ibge() -> pd.DataFrame:
@@ -1287,45 +1395,39 @@ def _carregar_focus_raw() -> pd.DataFrame:
 IPEADATA_BASE_URL = "http://ipeadata.gov.br/api/odata4/ValoresSerie(SERCODIGO='{codigo}')"
 SERIE_CAGED_SALDO_BR = "CAGED12_SALDON12"
 
-def _carregar_caged_saldo_df() -> pd.DataFrame:
+def _carregar_caged_saldo_df(max_anos: int = 10) -> pd.DataFrame:
     """
-    Baixa do Ipeadata o saldo de empregos formais (Novo CAGED, Brasil),
-    em pessoas, e devolve DataFrame com:
-      - data
-      - valor
+    Versão offline-first do CAGED:
+
+    1) Tenta usar o CSV data/mercado_trabalho/caged_saldo_brasil.csv,
+       gerado pelo caged_saldo_brasil.py + atualiza_dados_pesados.py.
+    2) Se não existir ou der erro, cai para um fallback online
+       (atualizar_caged_saldo_brasil_csv), atualiza o CSV e usa o resultado.
     """
-    url = IPEADATA_BASE_URL.format(codigo=SERIE_CAGED_SALDO_BR)
+    # 1) tenta CSV
+    df = carregar_caged_saldo_csv(max_anos=max_anos)
+    if df is not None and not df.empty:
+        return df
 
-    try:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        dados = resp.json()
-    except Exception as e:
-        print(f"[DEBUG CAGED] Erro na requisição Ipeadata: {e}")
-        return pd.DataFrame()
+    # 2) fallback: baixa da API e já atualiza o CSV
+    df_online = atualizar_caged_saldo_brasil_csv(max_anos=max_anos)
 
-    valores = dados.get("value", [])
-    if not valores:
-        print("[DEBUG CAGED] JSON sem campo 'value' ou lista vazia.")
-        return pd.DataFrame()
+    if "data" in df_online.columns:
+        df_online["data"] = pd.to_datetime(df_online["data"], errors="coerce")
+    if "valor" in df_online.columns:
+        df_online["valor"] = pd.to_numeric(df_online["valor"], errors="coerce")
 
-    df = pd.DataFrame(valores)
-
-    # Campos padrão do Ipeadata OData: VALDATA (data) e VALVALOR (valor)
-    if "VALDATA" not in df.columns or "VALVALOR" not in df.columns:
-        print(f"[DEBUG CAGED] Colunas inesperadas no Ipeadata: {df.columns.tolist()}")
-        return pd.DataFrame()
-
-    df["VALDATA"] = pd.to_datetime(df["VALDATA"])
-    df["VALVALOR"] = pd.to_numeric(df["VALVALOR"], errors="coerce")
-
-    df = (
-        df.dropna(subset=["VALDATA", "VALVALOR"])
-        .sort_values("VALDATA")
+    df_online = (
+        df_online.dropna(subset=["data", "valor"])
+        .sort_values("data")
         .reset_index(drop=True)
     )
 
-    return df.rename(columns={"VALDATA": "data", "VALVALOR": "valor"})
+    if not df_online.empty:
+        corte = pd.Timestamp.today() - pd.DateOffset(years=max_anos)
+        df_online = df_online[df_online["data"] >= corte].reset_index(drop=True)
+
+    return df_online
 
 
 def resumo_caged_saldo_novo() -> dict:
@@ -4239,35 +4341,6 @@ def get_historico_di_futuro():
 # =============================================================================
 # STREAMLIT - INTERFACE
 # =============================================================================
-
-
-def atualizar_dados_externos():
-    """
-    Atualiza os dados que ficam salvos em CSV fora do app principal:
-    - Curvas ANBIMA (prefixada, DI, IPCA+)
-    - Histórico dos contratos DI Futuro (B3)
-    - Spread 10Y Brasil local – US10Y (CSV para o card de risco-país)
-    """
-    atualizar_todas_as_curvas()
-    atualizar_historico_di_futuro()
-    atualizar_spread_10y()
-
-
-@st.cache_data(ttl=86400)  # 86400 segundos = 24 horas
-def atualizar_dados_externos_cache(chave_dia: str) -> bool:
-    """
-    Executa a atualização das curvas ANBIMA e do histórico de DI Futuro B3
-    no máximo UMA vez por dia (por servidor).
-
-    Regras:
-    - Se ANBIMA + DI Futuro atualizarem com sucesso, a função retorna True
-      e esse resultado fica cacheado para o 'chave_dia' informado.
-      => Próximas chamadas no mesmo dia NÃO batem de novo nas APIs.
-    - Se alguma chamada lançar exceção, nada é cacheado, e a exceção sobe.
-      => Próximas chamadas no mesmo dia podem tentar atualizar de novo.
-    """
-    atualizar_dados_externos()
-    return True
 
 
 def main():
