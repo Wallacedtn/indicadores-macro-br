@@ -4,6 +4,7 @@
 from __future__ import annotations
 from typing import Optional
 import streamlit as st
+from decimal import Decimal, ROUND_HALF_UP
 from dados_curto_prazo_br import (
     carregar_dados_curto_prazo_br,
     montar_resumo_ibovespa_tabela,
@@ -99,8 +100,12 @@ def _format_value_br(value: float, fmt_value: str) -> str:
 
 
 def _format_delta_br(value: float, decimals: int) -> str:
-    """Formata número de delta com casas decimais em notação BR."""
-    raw = f"{value:.{decimals}f}"
+    """Formata número de delta com casas decimais em notação BR (arredondamento financeiro)."""
+    if value is None:
+        return "-"
+    q = Decimal(10) ** -decimals            # ex.: 0.01 para 2 casas
+    arred = Decimal(str(value)).quantize(q, rounding=ROUND_HALF_UP)
+    raw = f"{arred:.{decimals}f}"           # aqui já vem -0.02 em vez de -0.01
     return _us_to_br_str(raw)
 
 

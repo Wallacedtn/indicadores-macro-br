@@ -33,19 +33,11 @@ from bloco_curto_prazo_br import (
 from dados_curto_prazo_br import carregar_dados_curto_prazo_br
 
 from curvas_anbima import (
-    atualizar_todas_as_curvas,
     montar_curva_anbima_hoje,
     montar_curva_anbima_variacoes,
 )
-from di_futuro_b3 import (
-    atualizar_historico_di_futuro,
-    carregar_historico_di_futuro,
-)
-
-from ibovespa_ipea import (
-    atualizar_historico_ibovespa,
-    carregar_historico_ibovespa,
-)
+from di_futuro_b3 import carregar_historico_di_futuro
+from ibovespa_ipea import carregar_historico_ibovespa
 
 from bloco_curto_prazo_br import (
     render_bloco_curto_prazo_br,
@@ -4239,35 +4231,6 @@ def get_historico_di_futuro():
 # =============================================================================
 # STREAMLIT - INTERFACE
 # =============================================================================
-
-
-def atualizar_dados_externos():
-    """
-    Atualiza os dados que ficam salvos em CSV fora do app principal:
-    - Curvas ANBIMA (prefixada, DI, IPCA+)
-    - Histórico dos contratos DI Futuro (B3)
-    - Spread 10Y Brasil local – US10Y (CSV para o card de risco-país)
-    """
-    atualizar_todas_as_curvas()
-    atualizar_historico_di_futuro()
-    atualizar_spread_10y()
-
-
-@st.cache_data(ttl=86400)  # 86400 segundos = 24 horas
-def atualizar_dados_externos_cache(chave_dia: str) -> bool:
-    """
-    Executa a atualização das curvas ANBIMA e do histórico de DI Futuro B3
-    no máximo UMA vez por dia (por servidor).
-
-    Regras:
-    - Se ANBIMA + DI Futuro atualizarem com sucesso, a função retorna True
-      e esse resultado fica cacheado para o 'chave_dia' informado.
-      => Próximas chamadas no mesmo dia NÃO batem de novo nas APIs.
-    - Se alguma chamada lançar exceção, nada é cacheado, e a exceção sobe.
-      => Próximas chamadas no mesmo dia podem tentar atualizar de novo.
-    """
-    atualizar_dados_externos()
-    return True
 
 
 def main():
