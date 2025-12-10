@@ -3000,7 +3000,7 @@ def render_bloco_termometro_macro_br() -> None:
             value=selic_atual,
             delta=selic_delta,
             fmt_value="{:.2f}",
-            value_is_pct=False,   # 15,00 sem símbolo de %
+            value_is_pct=True,   # 15,00 sem símbolo de %
             delta_is_pp=True,     # delta em p.p.
             badge=badge_selic,
             icon_html=ICON_PERCENT,
@@ -3049,17 +3049,39 @@ def render_bloco_termometro_macro_br() -> None:
                     + _format_delta_br(abs(di5_delta_ano), 2)
                     + " p.p. desde o início do ano"
                 )
+                    # texto do botão "i" (tooltip), explicando a data do canto superior direito
+            if di5_referencia:
+                info_di5 = (
+                    f"A data no canto superior direito ({badge_di5}) indica o "
+                    "último pregão com dado disponível para o contrato de DI "
+                    "mostrado no título do card. "
+                    "O valor principal é a taxa anualizada desse DI futuro e a seta "
+                    "mostra a variação, em pontos percentuais, em relação ao "
+                    "fechamento do dia útil anterior (D-1). "
+                    "O texto abaixo resume quanto essa taxa abriu ou fechou, em "
+                    "pontos percentuais, desde o início do ano."
+                )
+            else:
+                info_di5 = (
+                    "Este card mostra a taxa anualizada de um contrato de DI futuro "
+                    "(~5 anos). A seta compara a taxa de hoje com o fechamento do "
+                    "dia útil anterior (D-1). Quando houver dado atualizado, a data "
+                    "no canto superior direito passará a indicar o último pregão "
+                    "com informação disponível."
+                )
+
 
         metric_card(
             label=titulo_di5,
             value=di5_taxa,
             delta=di5_delta,
             fmt_value="{:.2f}",
-            value_is_pct=False,
+            value_is_pct=True,
             delta_is_pp=True,
             badge=badge_di5,
             icon_html=ICON_PERCENT,
             subtext=subtext_di5,
+            info_text=info_di5,
         )
 
     # 3) IPCA – variação mensal (mesmo padrão do Curto Prazo)
@@ -3077,6 +3099,31 @@ def render_bloco_termometro_macro_br() -> None:
         # se tiver Focus, mostra: "Mediana Focus para o mês: X,XX%"
         if (ipca_mensal is not None) and (focus_str is not None):
             subtext_ipca = f"Mediana Focus para o mês: {focus_str}"
+        
+        # Texto do botão "i" (tooltip), explicando a data do canto superior direito
+        if badge_ipca and ipca_mensal is not None:
+            info_ipca = (
+                f"A data no canto superior direito ({badge_ipca}) indica o "
+                "mês de referência do último dado de IPCA divulgado pelo IBGE. "
+                "O valor do card é a variação percentual do IPCA naquele mês, "
+                "e a seta mostra a diferença, em pontos percentuais (p.p.), "
+                "entre o IPCA realizado e a mediana das expectativas Focus "
+                "para esse mesmo mês."
+            )
+        elif badge_ipca:
+            info_ipca = (
+                f"A data no canto superior direito ({badge_ipca}) indica o "
+                "mês de referência do IPCA mais recente disponível. Quando o "
+                "dado for atualizado, o valor do card mostrará a variação "
+                "percentual desse mês e a seta comparará com a mediana Focus."
+            )
+        else:
+            info_ipca = (
+                "Este card mostra a variação mensal do IPCA e compara o dado "
+                "divulgado pelo IBGE com a mediana das expectativas Focus "
+                "para o mesmo mês."
+            )
+
 
         metric_card(
             "IPCA – variação mensal",
@@ -3088,6 +3135,7 @@ def render_bloco_termometro_macro_br() -> None:
             badge=badge_ipca,         # "10/2025", por exemplo
             icon_html=ICON_PERCENT,
             subtext=subtext_ipca,
+            info_text=info_ipca,
         )
 
 
@@ -3108,6 +3156,34 @@ def render_bloco_termometro_macro_br() -> None:
                 "Variações em 3m e a/a não disponíveis "
                 "(erro ao carregar séries)."
             )
+        # Texto do botão "i" (tooltip), explicando a data do canto superior direito
+        if ibc_ref and ibc_var_mom is not None:
+            info_ibc = (
+                f"A data no canto superior direito ({ibc_ref}) indica o mês de "
+                "referência do IBC-Br mais recente divulgado pelo Banco "
+                "Central. O valor do card é o nível do índice de atividade, "
+                "e a seta mostra a variação percentual dessazonalizada em "
+                "relação ao mês imediatamente anterior (M-1). "
+                "O texto abaixo resume as variações em 3 meses "
+                "(dessazonalizado) e em 12 meses (sem ajuste sazonal), "
+                "quando disponíveis."
+            )
+        elif ibc_ref:
+            info_ibc = (
+                f"A data no canto superior direito ({ibc_ref}) indica o mês de "
+                "referência do IBC-Br mais recente disponível. Quando a série "
+                "está completa, o card mostra a variação dessazonalizada mês "
+                "a mês (M-1) e as variações em 3 meses e em 12 meses."
+            )
+        else:
+            info_ibc = (
+                "Este card mostra o nível e a variação mensal do IBC-Br, um "
+                "indicador de atividade econômica calculado pelo Banco "
+                "Central. A seta compara o mês corrente com o mês "
+                "imediatamente anterior (M-1) e o texto abaixo resume "
+                "variações em 3 meses e em 12 meses."
+            )
+
 
         metric_card(
             label="IBC-Br – nível / variação M-1",
@@ -3119,6 +3195,7 @@ def render_bloco_termometro_macro_br() -> None:
             badge=ibc_ref,             # seta = mês vs mês anterior
             icon_html=ICON_CHART,
             subtext=subtext_ibc,       # "3m (dessaz.): ... | a/a (sem ajuste): ..."
+            info_text=info_ibc,
         )
 
 
@@ -3140,6 +3217,12 @@ def render_bloco_termometro_macro_br() -> None:
         ref_caged = resumo_caged.get("referencia") or "-"
 
         if saldo_atual is None:
+            info_caged = (
+                "Este card mostra o saldo líquido de empregos formais reportado "
+                "pelo Novo Caged (admissões menos demissões). Quando os dados "
+                "estão indisponíveis, o painel exibe esta mensagem de aviso."
+            )
+
             metric_card(
                 label="Emprego formal – saldo (mês vs a/a)",
                 value=0.0,
@@ -3150,7 +3233,9 @@ def render_bloco_termometro_macro_br() -> None:
                 badge="Sem dados CAGED",
                 icon_html=ICON_CHART,
                 subtext="Não foi possível carregar o Novo Caged (Ipeadata).",
+                info_text=info_caged,   # 👈 NOVO
             )
+
         else:
             # saldo e delta em MIL vagas
             valor_mil = saldo_atual / 1000.0
@@ -3170,6 +3255,26 @@ def render_bloco_termometro_macro_br() -> None:
             else:
                 subtext_caged = "Saldo mensal de vagas formais. Δ vs mesmo mês há 12m."
 
+            # Texto do botão "i" (tooltip), explicando a data do canto superior direito
+            if ref_caged and ref_caged != "-":
+                info_caged = (
+                    f"A data no canto superior direito ({ref_caged}) indica o "
+                    "mês de referência do saldo de empregos formais reportado "
+                    "pelo Novo Caged. O valor do card mostra o saldo líquido de "
+                    "vagas formais criado no mês (admissões menos demissões), "
+                    "em milhares de postos de trabalho. A pílula embaixo indica "
+                    "a diferença, também em milhares de vagas, em relação ao "
+                    "mesmo mês do ano anterior (variação a/a). O texto abaixo "
+                    "compara o saldo do mês com a média dos últimos cinco anos "
+                    "para esse mesmo mês."
+                )
+            else:
+                info_caged = (
+                    "Este card mostra o saldo líquido de empregos formais "
+                    "reportado pelo Novo Caged, em milhares de vagas, e a "
+                    "variação em relação ao mesmo mês do ano anterior."
+                )
+
             metric_card(
                 label="Emprego formal – saldo (mês vs a/a)",
                 value=valor_mil,                 # ex.: 85 -> "85 mil"
@@ -3184,6 +3289,7 @@ def render_bloco_termometro_macro_br() -> None:
                 delta_money_prefix="R$ ",
                 delta_money_suffix=" mil",
                 delta_money_decimals=0,
+                info_text=info_caged,            # 👈 NOVO
             )
 
 
@@ -3218,6 +3324,22 @@ def render_bloco_termometro_macro_br() -> None:
                 partes_subtexto.append(f"há 24m: {desemp_24m:.1f}%")
             subtexto = " | ".join(partes_subtexto)
 
+            # badge com o texto do trimestre móvel, ex.: "TRI ATÉ OUT/2025"
+            badge_pnad = dados_macro.desemprego_pnad_referencia or "PNAD – tri móvel"
+
+            # Texto do botão "i"
+            info_pnad = (
+                "Este card mostra a taxa de desemprego medida pela PNAD Contínua "
+                "(IBGE), calculada sobre o trimestre móvel mais recente. "
+                f"A data '{badge_pnad}' no canto superior direito indica o "
+                "trimestre móvel de referência. "
+                "O valor principal é a taxa média de desocupação desse período. "
+                "A variação (Δ) mostra a diferença, em pontos percentuais, em "
+                "relação ao mesmo trimestre móvel de 12 meses atrás. "
+                "No texto abaixo, são exibidas as taxas observadas há 12 e 24 "
+                "meses, para comparação histórica."
+            )
+
             metric_card(
                 label="Desemprego – PNAD Contínua (trimestre móvel, %)",
                 value=desemp_atual,
@@ -3225,10 +3347,12 @@ def render_bloco_termometro_macro_br() -> None:
                 fmt_value="{:.1f}",
                 value_is_pct=True,
                 delta_is_pp=True,  # delta é em p.p.
-                badge=dados_macro.desemprego_pnad_referencia or "PNAD – tri móvel",
+                badge=badge_pnad,
                 icon_html=ICON_PERCENT,
                 subtext=subtexto,
+                info_text=info_pnad,  # 👈 ativa o botão "i" com a explicação
             )
+
 
     # 7) Câmbio BRL/USD (PTAX) – mesmo visual do Curto Prazo
     with col7:
@@ -3255,6 +3379,25 @@ def render_bloco_termometro_macro_br() -> None:
         # badge = data de referência da PTAX (dd/mm/aaaa)
         badge_ptax = obter_referencia_ptax() or "-"
 
+        # Texto do botão "i" (tooltip), explicando a data do canto superior direito
+        if badge_ptax != "-" and ptax is not None:
+            info_ptax = (
+                f"A data no canto superior direito ({badge_ptax}) indica o dia "
+                "de referência da PTAX de venda divulgada pelo Banco Central. "
+                "O valor do card mostra a cotação do dólar em reais (R$/US$) "
+                "para esse dia. A variação diária (Δ) exibe, em percentual, "
+                "quanto a PTAX se apreciou ou se depreciou em relação ao "
+                "fechamento do dia útil anterior. No texto abaixo, são "
+                "mostradas as variações acumuladas em 12 meses e em 24 meses."
+            )
+        else:
+            info_ptax = (
+                "Este card mostra a cotação do dólar PTAX de venda em R$/US$ "
+                "e a variação diária em relação ao fechamento anterior. "
+                "O texto abaixo resume as variações acumuladas em 12 e 24 meses."
+            )
+
+
         metric_card(
             "PTAX – dólar (R$) – intraday",
             ptax,
@@ -3265,6 +3408,7 @@ def render_bloco_termometro_macro_br() -> None:
             badge=badge_ptax,    # dd/mm/aaaa
             icon_html=ICON_DOLLAR,
             subtext=fx_subtext,
+            info_text=info_ptax,
         )
 
 
@@ -3298,6 +3442,24 @@ def render_bloco_termometro_macro_br() -> None:
         # badge = data do último fechamento (dd/mm/aaaa)
         ibov_referencia = obter_referencia_ibovespa() or "-"
 
+        # Texto do botão "i" (tooltip), explicando a data do canto superior direito
+        if ibov_referencia != "-" and valor_ibov is not None:
+            info_ibov = (
+                f"A data no canto superior direito ({ibov_referencia}) indica o "
+                "último pregão com fechamento disponível do Ibovespa. "
+                "O valor principal do card mostra o nível do índice em pontos, "
+                "enquanto a variação diária (Δ) indica, em percentual, quanto o "
+                "Ibovespa subiu ou caiu em relação ao fechamento do dia útil "
+                "anterior (D-1). No texto abaixo, são exibidas as variações "
+                "acumuladas no mês e no ano."
+            )
+        else:
+            info_ibov = (
+                "Este card mostra o nível do Ibovespa em pontos, a variação "
+                "diária em relação ao fechamento anterior (D-1) e, no texto "
+                "inferior, as variações acumuladas no mês e no ano."
+            )
+
         metric_card(
             "Ibovespa – pts – VS D-1",
             valor_ibov,
@@ -3308,6 +3470,7 @@ def render_bloco_termometro_macro_br() -> None:
             badge=ibov_referencia,   # dd/mm/aaaa
             icon_html=ICON_CHART,
             subtext=ibov_subtext,
+            info_text=info_ibov,
         )
 
 
@@ -3331,6 +3494,13 @@ def render_bloco_termometro_macro_br() -> None:
         ) = carregar_risco_brasil_spread_10y()
 
         if risco_nivel is None:
+            info_risco = (
+                "Este card mostra o spread de risco-país em pontos-base (p.b.) "
+                "entre o título soberano brasileiro de 10 anos e o título "
+                "americano de 10 anos (US Treasury). Quando os dados não estão "
+                "disponíveis, o painel exibe esta mensagem de aviso."
+            )
+
             metric_card(
                 label="Risco-Brasil – spread 10Y (proxy risco-país)",
                 value=0.0,
@@ -3341,13 +3511,46 @@ def render_bloco_termometro_macro_br() -> None:
                 badge="sem dados",
                 icon_html=ICON_CHART,
                 subtext="Não foi possível carregar o spread 10Y Brasil local – US10Y.",
+                info_text=info_risco,  # 👈 NOVO
             )
+
         else:
             # texto enxuto: apenas início do mês em p.b.
             if risco_inicio_mes is not None:
                 subtext_spread = f"Início do mês: {risco_inicio_mes:.0f} p.b."
             else:
                 subtext_spread = None
+
+            # Texto do botão "i" (tooltip), explicando a data do canto superior direito
+            if risco_ref:
+                info_risco = (
+                    f"A data no canto superior direito ({risco_ref}) indica o "
+                    "último dia com dado disponível para o spread de 10 anos "
+                    "entre a taxa soberana brasileira e o título do Tesouro "
+                    "americano de 10 anos. O valor do card mostra esse spread "
+                    "em pontos-base (p.b.). A variação diária (Δ) indica, "
+                    "também em p.b., quanto o spread se alargou ou fechou em "
+                    "relação ao dia útil anterior (D-1). O texto abaixo resume "
+                    f"o nível do spread no início do mês "
+                    f"({risco_inicio_mes:.0f} p.b., quando disponível)."
+                    if risco_inicio_mes is not None
+                    else (
+                        f"A data no canto superior direito ({risco_ref}) indica o "
+                        "último dia com dado disponível para o spread de 10 anos "
+                        "entre Brasil e EUA. O valor do card mostra esse spread "
+                        "em pontos-base (p.b.) e a variação diária (Δ) indica a "
+                        "mudança em relação ao dia útil anterior."
+                    )
+                )
+            else:
+                info_risco = (
+                    "Este card mostra o spread, em pontos-base (p.b.), entre a "
+                    "taxa de juros soberana brasileira de 10 anos e o título do "
+                    "Tesouro americano de 10 anos. A variação diária (Δ) indica "
+                    "quanto esse spread se alargou ou fechou em relação ao dia "
+                    "anterior, e o texto abaixo destaca o nível observado no "
+                    "início do mês."
+                )
 
             metric_card(
                 label="Risco-País – spread 10Y (Brasil/USA)",
@@ -3365,6 +3568,7 @@ def render_bloco_termometro_macro_br() -> None:
                 delta_money_prefix="",
                 delta_money_suffix=" p.b.",
                 delta_money_decimals=2,
+                info_text=info_risco,     # 👈 NOVO
             )
 
 
@@ -3385,6 +3589,24 @@ def render_bloco_termometro_macro_br() -> None:
                 "Níveis de 12m e 24m não disponíveis "
                 "(erro ao carregar série)."
             )
+        # Texto do botão "i" (tooltip), explicando a data do canto superior direito
+        if badge_divida:
+            info_divida = (
+                f"A data no canto superior direito ({badge_divida}) indica o "
+                "mês de referência da dívida bruta do governo geral. "
+                "O valor do card mostra o estoque de dívida bruta como "
+                "percentual do PIB naquele mês. A variação (Δ) indica, em "
+                "pontos percentuais, quanto esse indicador mudou em relação "
+                "ao mesmo mês do ano anterior. O texto abaixo resume os "
+                "níveis observados há 12 e 24 meses."
+            )
+        else:
+            info_divida = (
+                "Este card mostra a dívida bruta do governo geral como "
+                "percentual do PIB e a variação em pontos percentuais em "
+                "relação ao mesmo mês do ano anterior."
+            )
+
 
         metric_card(
             label="Dívida Bruta GG – nível (% PIB, Δ a/a em p.p.)",
@@ -3396,6 +3618,7 @@ def render_bloco_termometro_macro_br() -> None:
             badge=badge_divida,        # ex.: "10/2025"
             icon_html=ICON_PERCENT,
             subtext=subtext_divida,    # "há 12m: ... | há 24m: ..."
+            info_text=info_divida,
         )
 
 
@@ -3438,6 +3661,25 @@ def render_bloco_termometro_macro_br() -> None:
 
         else:
             subtext_prim = "Acum. no ano indisponível."
+        
+        # Texto do botão "i" (tooltip), explicando a data do canto superior direito
+        if badge_prim and prim_mes is not None:
+            info_prim = (
+                f"A data no canto superior direito ({badge_prim}) indica o "
+                "mês de referência do resultado primário do Governo Central. "
+                "O valor do card mostra o resultado primário do mês, em "
+                "bilhões de reais (já em termos reais). A variação (Δ) mostra "
+                "a diferença, também em bilhões de reais, em relação ao "
+                "mesmo mês do ano anterior. O texto abaixo resume o resultado "
+                "primário acumulado no ano até o mês de referência."
+            )
+        else:
+            info_prim = (
+                "Este card mostra o resultado primário mensal do Governo "
+                "Central em bilhões de reais, a diferença em relação ao "
+                "mesmo mês do ano anterior e o resultado acumulado no ano."
+            )
+
 
         metric_card(
             label="Resultado Primário Governo – mês vs a/a",
@@ -3450,6 +3692,7 @@ def render_bloco_termometro_macro_br() -> None:
             badge=badge_prim,              # ex.: 10/25
             icon_html=ICON_DOLLAR,
             subtext=subtext_prim,          # "Acum. no ano: déficit de R$ 63,7 bi."
+            info_text=info_prim,
         )
 
 
@@ -3465,6 +3708,13 @@ def render_bloco_termometro_macro_br() -> None:
         ref_bal = resumo_balanca.get("referencia") or "-"
 
         if saldo_mes is None:
+            info_bal = (
+                "Este card mostra o saldo mensal da balança comercial em "
+                "bilhões de dólares e a variação em relação ao mesmo mês do "
+                "ano anterior. Quando os dados não estão disponíveis, o "
+                "painel exibe esta mensagem de aviso."
+            )
+
             metric_card(
                 label="Balança Comercial - mês vs a/a  (US$ bi)",
                 value=0.0,
@@ -3475,7 +3725,9 @@ def render_bloco_termometro_macro_br() -> None:
                 badge="sem dados",
                 icon_html=ICON_DOLLAR,
                 subtext="Não foi possível carregar a balança comercial (ver CSV).",
+                info_text=info_bal,   # 👈 NOVO
             )
+
         else:
             # texto pequeno: acumulado no ano + % vs mesmo período do ano anterior
             if acum_ano_bi is not None:
@@ -3497,6 +3749,26 @@ def render_bloco_termometro_macro_br() -> None:
             delta_val = var_mes_pct_aa if var_mes_pct_aa is not None else 0.0
             delta_is_pct_flag = var_mes_pct_aa is not None
 
+            # Texto do botão "i" (tooltip), explicando a data do canto superior direito
+            if ref_bal and ref_bal != "-":
+                info_bal = (
+                    f"A data no canto superior direito ({ref_bal}) indica o "
+                    "mês de referência do saldo da balança comercial. "
+                    "O valor do card mostra o saldo do mês em bilhões de "
+                    "dólares. A variação (Δ) indica, em percentual, quanto "
+                    "esse saldo mudou em relação ao mesmo mês do ano anterior. "
+                    "O texto abaixo resume o saldo acumulado no ano e a "
+                    "variação desse acumulado em relação ao mesmo período "
+                    "do ano anterior."
+                )
+            else:
+                info_bal = (
+                    "Este card mostra o saldo mensal da balança comercial em "
+                    "bilhões de dólares, a variação percentual em relação ao "
+                    "mesmo mês do ano anterior e o saldo acumulado no ano."
+                )
+
+
             metric_card(
                 label="Balança Comercial - mês vs a/a  (US$ bi)",
                 value=saldo_mes,                  # ex.: US$ 5,8 bi
@@ -3507,6 +3779,7 @@ def render_bloco_termometro_macro_br() -> None:
                 badge=ref_bal,                    # badge = mm/aaaa
                 icon_html=ICON_DOLLAR,
                 subtext=subtext_bal,
+                info_text=info_bal,
             )
 
 
