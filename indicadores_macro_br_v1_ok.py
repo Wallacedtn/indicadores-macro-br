@@ -2973,6 +2973,27 @@ def render_bloco_termometro_macro_br() -> None:
             selic_subtext = f"Última decisão do Copom: {data_ultima}"
         else:
             selic_subtext = "Δ vs última decisão do Copom"
+        
+        # Texto do botão "i" (tooltip), explicando a data do canto superior direito
+        if data_proxima and data_ultima:
+            info_selic = (
+                f"A data no canto superior direito ({badge_selic}) indica a "
+                f"**próxima reunião do Copom**. O valor do card é a Selic meta "
+                f"atual, e a seta compara com a taxa definida na última reunião "
+                f"({data_ultima})."
+            )
+        elif data_proxima:
+            info_selic = (
+                f"A data no canto superior direito ({badge_selic}) indica a "
+                "próxima reunião do Copom. A variação mostra a diferença em "
+                "pontos percentuais entre a Selic atual e a última decisão."
+            )
+        else:
+            info_selic = (
+                "Quando houver calendário definido, a data no canto superior "
+                "direito mostrará a próxima reunião do Copom. O valor do card é "
+                "a Selic meta atual e a seta compara com a última decisão disponível."
+            )
 
         metric_card(
             label="Selic meta vs última decisão do Copom",
@@ -2984,6 +3005,7 @@ def render_bloco_termometro_macro_br() -> None:
             badge=badge_selic,
             icon_html=ICON_PERCENT,
             subtext=selic_subtext,
+            info_text=info_selic,
         )
 
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Optional
 import streamlit as st
 from decimal import Decimal, ROUND_HALF_UP
+from html import escape
+
 from dados_curto_prazo_br import (
     carregar_dados_curto_prazo_br,
     montar_resumo_ibovespa_tabela,
@@ -215,6 +217,31 @@ def _inject_ion_css_curto_prazo() -> None:
     color: {ION_TEXT_MUTED};
     opacity: 0.9;
 }}
+
+/* Botãozinho de informação ("i") no canto inferior direito */
+.ion-info {{
+    position: absolute;
+    bottom: 10px;
+    right: 16px;
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    border: 1px solid rgba(249, 250, 251, 0.4);
+    background: rgba(15, 23, 42, 0.7);
+    color: rgba(249, 250, 251, 0.9);
+    font-size: 11px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    cursor: default;
+}}
+
+.ion-info:hover {{
+    background: rgba(249, 250, 251, 0.12);
+}}
+
         </style>""",
         unsafe_allow_html=True,
     )
@@ -240,7 +267,9 @@ def metric_card(
     delta_money_prefix: str = "R$ ",
     delta_money_suffix: str = " bi",
     delta_money_decimals: int = 2,
+    info_text: Optional[str] = None,
 ) -> None:
+
     """
     Desenha um card:
       - ícone (opcional)
@@ -304,6 +333,13 @@ def metric_card(
     icon_block = icon_html or ""
     subtext_html = f"<div class='ion-subtext'>{subtext}</div>" if subtext else ""
 
+    # --- botão "i" de informação (opcional) ---
+    if info_text:
+        safe_title = escape(info_text)
+        info_html = f'<button class="ion-info" title="{safe_title}">i</button>'
+    else:
+        info_html = ""
+
     html = f"""<div class="ion-card">
   {badge_html}
   {icon_block}
@@ -311,9 +347,11 @@ def metric_card(
   <div class="ion-value">{display_value}</div>
   {delta_html}
   {subtext_html}
+  {info_html}
 </div>
 """
     st.markdown(html, unsafe_allow_html=True)
+
 
 
 # =============================================================================
