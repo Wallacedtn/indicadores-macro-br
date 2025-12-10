@@ -4510,6 +4510,82 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
     )
 
 
+def render_bloco_expectativas_focus(
+    df_focus: pd.DataFrame,
+    df_focus_top5: pd.DataFrame,
+):
+    """Bloco de expectativas de mercado (Focus) – Brasil."""
+
+    st.markdown("### Expectativas de mercado – Brasil (Focus)")
+
+    # descobre a data mais recente nas bases do Focus (Mediana e Top5)
+    try:
+        df_raw_focus = _carregar_focus_raw()
+        data_mediana = (
+            df_raw_focus["Data"].max()
+            if not df_raw_focus.empty
+            else None
+        )
+    except Exception:
+        data_mediana = None
+
+    try:
+        df_raw_top5 = _carregar_focus_top5_raw()
+        data_top5 = (
+            df_raw_top5["Data"].max()
+            if not df_raw_top5.empty
+            else None
+        )
+    except Exception:
+        data_top5 = None
+
+    # funçãozinha auxiliar p/ formatar a data em texto
+    def _fmt_data(d):
+        if d is None or pd.isna(d):
+            return "sem data disponível"
+        try:
+            return pd.to_datetime(d).strftime("%d/%m/%Y")
+        except Exception:
+            return str(d)
+
+    data_mediana_txt = _fmt_data(data_mediana)
+    data_top5_txt = _fmt_data(data_top5)
+
+    # ---------- Focus – Mediana ----------
+    st.markdown("**Focus – Mediana (consenso do mercado)**")
+    st.caption(
+        "Mediana das projeções de todas as instituições participantes "
+        f"do boletim Focus. Dados de {data_mediana_txt}."
+    )
+    st.table(df_focus.set_index("Indicador"))
+
+    # ---------- Focus – Top 5 ----------
+    st.markdown("**Focus – Top 5 (instituições mais assertivas)**")
+    st.caption(
+        "Mediana das projeções das 5 instituições com melhor "
+        f"desempenho histórico no Focus. Dados de {data_top5_txt}."
+    )
+    st.table(df_focus_top5.set_index("Indicador"))
+
+    # ---------- Focus – expectativas mensais p/ próximo mês ----------
+    df_focus_mensal_prox, mes_prox_txt, data_mensal_txt = (
+        montar_tabela_focus_mensal_proximo_mes()
+    )
+
+    st.markdown("**Focus – Expectativas mensais para o próximo mês**")
+    st.caption(
+        "Mediana das projeções mensais para o próximo mês-calendário "
+        f"(mês de referência: {mes_prox_txt}). "
+        f"Dados do boletim Focus de {data_mensal_txt}."
+    )
+    if df_focus_mensal_prox.empty:
+        st.info(
+            "Ainda não há expectativas mensais disponíveis para o próximo mês."
+        )
+    else:
+        st.table(df_focus_mensal_prox.set_index("Indicador"))
+
+
 def render_bloco6_inflacao(df_infla: pd.DataFrame):
     """Bloco 6 – Inflação (IPCA e IPCA-15) em layout Ion-like."""
     if df_infla is None or df_infla.empty:
@@ -4737,7 +4813,11 @@ def main():
 
     with tab6:
         with st.container():
-            render_bloco6_inflacao(df_infla=df_infla)
+            render_bloco_expectativas_focus(
+                df_focus=df_focus,
+                df_focus_top5=df_focus_top5,
+            )
+
 
     with tab7:
         with st.container():
