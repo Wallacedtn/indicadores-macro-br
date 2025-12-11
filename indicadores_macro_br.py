@@ -4466,6 +4466,166 @@ def render_bloco1_observatorio_mercado(
 
                 df_caged_curto = pd.DataFrame([linha_caged])
                 st.table(df_caged_curto.set_index("Indicador"))
+            
+            # --- Bloco macro/fiscal: IBC-Br, desemprego, dívida, primário, balança comercial ---
+
+            # Helpers genéricos de formatação
+            def _fmt_pct_1(v: float | None) -> str:
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    return "-"
+                return f"{v:.1f}%".replace(".", ",")
+
+            def _fmt_pct_2(v: float | None) -> str:
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    return "-"
+                return f"{v:.2f}%".replace(".", ",")
+
+            def _fmt_pp_1(v: float | None) -> str:
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    return "-"
+                sinal = "+" if v > 0 else ""
+                return f"{sinal}{v:.1f} p.p.".replace(".", ",")
+
+            def _fmt_real_bi(v: float | None) -> str:
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    return "-"
+                return "R$ " + _format_br_number(v, 1) + " bi"
+
+            def _fmt_usd_bi(v: float | None) -> str:
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    return "-"
+                return "US$ " + _format_br_number(v, 1) + " bi"
+
+            # Tenta carregar o pacote macro/fiscal completo
+            try:
+                dados_macro = carregar_dados_macro_fiscal_br()
+            except Exception:
+                dados_macro = None
+
+            # --- Atividade – IBC-Br ---
+            st.markdown("**Atividade – IBC-Br (dessazonalizado)**")
+            if (dados_macro is None) or (dados_macro.ibcbr_nivel is None):
+                st.info("Não foi possível carregar o IBC-Br dessazonalizado.")
+            else:
+                ibc_nivel = dados_macro.ibcbr_nivel
+                ibc_var_mom = dados_macro.ibcbr_var_mom
+                ibc_var_3m = dados_macro.ibcbr_var_3m_dessaz
+                ibc_var_aa = dados_macro.ibcbr_var_aa
+                ibc_ref = dados_macro.ibcbr_referencia or "-"
+
+                linha_ibc = {
+                    "Indicador": "IBC-Br – atividade (SA)",
+                    "Data ref.": ibc_ref,
+                    "Nível (índice)": _format_br_number(ibc_nivel, 2),
+                    "Var. m/m (dessaz.)": _fmt_pct_2(ibc_var_mom),
+                    "Var. 3m (dessaz.)": _fmt_pct_2(ibc_var_3m),
+                    "Var. a/a (sem ajuste)": _fmt_pct_2(ibc_var_aa),
+                    "Fonte": "BCB / SGS (IBC-Br dessazonalizado)",
+                }
+                df_ibc = pd.DataFrame([linha_ibc])
+                st.table(df_ibc.set_index("Indicador"))
+
+            # --- Mercado de Trabalho – Desemprego PNAD ---
+            st.markdown("**Mercado de Trabalho – Desemprego (PNAD Contínua)**")
+            if (dados_macro is None) or (dados_macro.desemprego_pnad is None):
+                st.info("Não foi possível carregar a PNAD Contínua (desemprego).")
+            else:
+                dm = dados_macro
+                desemp_atual = dm.desemprego_pnad
+                desemp_12m = dm.desemprego_pnad_12m_atras
+                desemp_24m = dm.desemprego_pnad_24m_atras
+                desemp_delta_pp_12m = dm.desemprego_delta_pp_12m
+                ref_pnad = dm.desemprego_pnad_referencia or "-"
+
+                linha_desemp = {
+                    "Indicador": "Desemprego – PNAD Contínua (tri móvel)",
+                    "Data ref.": ref_pnad,
+                    "Nível atual": _fmt_pct_1(desemp_atual),
+                    "Nível há 12m": _fmt_pct_1(desemp_12m),
+                    "Nível há 24m": _fmt_pct_1(desemp_24m),
+                    "Δ 12m (p.p.)": _fmt_pp_1(desemp_delta_pp_12m),
+                    "Fonte": "IBGE – PNAD Contínua (trimestre móvel)",
+                }
+                df_desemp = pd.DataFrame([linha_desemp])
+                st.table(df_desemp.set_index("Indicador"))
+
+            # --- Dívida Bruta do Governo Geral (% PIB) ---
+            st.markdown("**Fiscal – Dívida Bruta do Governo Geral (% do PIB)**")
+            if (dados_macro is None) or (dados_macro.divida_bruta_pct_pib is None):
+                st.info("Não foi possível carregar a série de dívida bruta/PIB.")
+            else:
+                dm = dados_macro
+                div_nivel = dm.divida_bruta_pct_pib
+                div_12m = dm.divida_bruta_pct_pib_12m_atras
+                div_24m = dm.divida_bruta_pct_pib_24m_atras
+                div_ref = dm.divida_bruta_referencia or "-"
+                # Δ a/a em p.p. (nível atual – nível de 12m atrás)
+                div_delta_aa = None
+                if (div_nivel is not None) and (div_12m is not None):
+                    div_delta_aa = div_nivel - div_12m
+
+                linha_divida = {
+                    "Indicador": "Dívida Bruta Governo Geral (% PIB)",
+                    "Data ref.": div_ref,
+                    "Nível atual": _fmt_pct_2(div_nivel),
+                    "Nível há 12m": _fmt_pct_2(div_12m),
+                    "Nível há 24m": _fmt_pct_2(div_24m),
+                    "Δ a/a (p.p.)": _fmt_pp_1(div_delta_aa),
+                    "Fonte": "BCB / SGS (Dívida Bruta GG)",
+                }
+                df_divida = pd.DataFrame([linha_divida])
+                st.table(df_divida.set_index("Indicador"))
+
+            # --- Resultado Primário – Governo Central (R$ bi) ---
+            st.markdown("**Fiscal – Resultado Primário do Governo Central (R$ bi)**")
+            if (dados_macro is None) or (dados_macro.primario_mes_real_bi is None):
+                st.info("Não foi possível carregar o resultado primário do Governo Central.")
+            else:
+                dm = dados_macro
+                prim_mes = dm.primario_mes_real_bi
+                prim_delta_mes_aa = dm.primario_mes_delta_real_bi_aa
+                prim_acum_ano = dm.primario_ano_real_bi
+                prim_ref = getattr(dm, "primario_referencia", None) or "-"
+
+                linha_prim = {
+                    "Indicador": "Resultado primário – mês (nominal)",
+                    "Data ref.": prim_ref,
+                    "Resultado do mês": _fmt_real_bi(prim_mes),
+                    "Δ vs mesmo mês a/a": _fmt_real_bi(prim_delta_mes_aa),
+                    "Acum. no ano": _fmt_real_bi(prim_acum_ano),
+                    "Fonte": "Tesouro Nacional / STN (resultado primário nominal)",
+                }
+                df_prim = pd.DataFrame([linha_prim])
+                st.table(df_prim.set_index("Indicador"))
+
+            # --- Setor Externo – Balança Comercial (US$) ---
+            st.markdown("**Setor Externo – Balança Comercial (mensal, US$)**")
+            try:
+                resumo_balanca = resumo_balanca_comercial_mensal()
+            except Exception:
+                resumo_balanca = None
+
+            if (resumo_balanca is None) or (resumo_balanca.get("saldo_mes_bi") is None):
+                st.info("Não foi possível carregar o resumo mensal da balança comercial.")
+            else:
+                ref_bal = resumo_balanca.get("referencia") or "-"
+                saldo_mes_bi = resumo_balanca.get("saldo_mes_bi")
+                var_mes_pct_aa = resumo_balanca.get("var_mes_pct_aa")
+                acum_ano_bi = resumo_balanca.get("acum_ano_bi")
+                acum_ano_var_pct = resumo_balanca.get("acum_ano_var_pct")
+
+                linha_balanca = {
+                    "Indicador": "Balança comercial – saldo do mês",
+                    "Data ref.": ref_bal,
+                    "Saldo do mês": _fmt_usd_bi(saldo_mes_bi),
+                    "Var. mês vs a/a": _fmt_pct_2(var_mes_pct_aa),
+                    "Acum. no ano": _fmt_usd_bi(acum_ano_bi),
+                    "Var. acum. ano vs a/a": _fmt_pct_2(acum_ano_var_pct),
+                    "Fonte": "BCB – Balança Comercial (SISBACEN/SGS)",
+                }
+                df_balanca = pd.DataFrame([linha_balanca])
+                st.table(df_balanca.set_index("Indicador"))
+
 
             # --- Risco-País – spread 10Y (Brasil/USA) ---
             st.markdown("**Risco-País – spread 10Y (Brasil/USA)**")
