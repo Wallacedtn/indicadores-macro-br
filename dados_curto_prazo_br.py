@@ -22,10 +22,7 @@ def _to_float_scalar(val: Any) -> float:
         return float(val.iloc[0])
     return float(val)
 
-from di_futuro_b3 import (
-    baixar_snapshot_di_futuro,   # snapshot do dia
-    carregar_historico_di_futuro # di1_historico.csv
-)  # DI Futuro B
+from di_futuro_b3 import carregar_historico_di_futuro  # di1_historico.csv
 
 
 # Caminho para o CSV de curvas ANBIMA (já usado no bloco de Curvas)
@@ -864,18 +861,15 @@ def _carregar_di_futuro_2e5_anos() -> Tuple[
     str,
 ]:
     """
-    Usa o snapshot DI Futuro B3 + histórico (csv) para aproximar
-    as taxas de 2 anos e 5 anos e a variação:
+    Nova versão: NÃO chama mais API da B3 dentro do app.
 
-      - Se a API da B3 trouxer `variacao_bps`, usamos como delta intraday.
-      - Caso contrário, tentamos calcular delta vs D-1 a partir do histórico.
-      - Se o snapshot do dia falhar, usamos o ÚLTIMO DIA disponível no histórico
-        para nível e delta (fonte = 'D-1').
+    Usa APENAS o histórico di1_historico.csv (carregar_historico_di_futuro)
+    para aproximar as taxas de 2 anos e 5 anos e a variação vs D-1.
 
-    Retorna:
-      (ticker_2a, di_2a_taxa, di_2a_delta, fonte_2,
-       ticker_5a, di_5a_taxa, di_5a_delta, fonte_5)
+    Quem deve atualizar o CSV é o job diário (atualiza_dados_pesados.py).
     """
+
+    # Valores padrão (caso dê problema)
     di_2_taxa: Optional[float] = None
     di_2_delta: Optional[float] = None
     di_5_taxa: Optional[float] = None
@@ -885,85 +879,75 @@ def _carregar_di_futuro_2e5_anos() -> Tuple[
     ticker_di2: Optional[str] = None
     ticker_di5: Optional[str] = None
 
-    # 1) Snapshot do dia (tenta intraday)
-    try:
-        df = baixar_snapshot_di_futuro()
-    except Exception:
-        df = None
-
-    if df is not None and not df.empty:
-        ticker_di2, di_2_taxa, di_2_delta_intr = _escolher_di_por_prazo(
-            df, anos_alvo=2.0
-        )
-        ticker_di5, di_5_taxa, di_5_delta_intr = _escolher_di_por_prazo(
-            df, anos_alvo=5.0
-        )
-
-        if di_2_taxa is not None and di_2_delta_intr is not None:
-            di_2_delta = di_2_delta_intr
-            fonte_di2 = "intraday"
-
-        if di_5_taxa is not None and di_5_delta_intr is not None:
-            di_5_delta = di_5_delta_intr
-            fonte_di5 = "intraday"
-
-    # 2) Histórico (csv) – para delta D-1 e fallback de nível
+    # 1) Carrega o histórico a partir do CSV
     try:
         df_hist = carregar_historico_di_futuro()
     except Exception:
-        df_hist = None
+        return (
+            ticker_di2,
+            di_2_taxa,
+            di_2_delta,
+            fonte_di2,
+            ticker_di5,
+            di_5_taxa,
+            di_5_delta,
+            fonte_di5,
+        )
 
-    if df_hist is not None and not df_hist.empty:
-        # 2a) Se já temos taxa do snapshot, mas não temos delta intraday,
-        #     calculamos delta vs D-1.
-        if di_2_taxa is not None and (di_2_delta is None or fonte_di2 == "none"):
-            delta_d1 = _delta_di_vs_d1(df_hist, ticker_di2, di_2_taxa)
-            if delta_d1 is not None:
-                di_2_delta = delta_d1
-                fonte_di2 = "D-1"
+    if df_hist is None or df_hist.empty:
+        return (
+            ticker_di2,
+            di_2_taxa,
+            di_2_delta,
+            fonte_di2,
+            ticker_di5,
+            di_5_taxa,
+            di_5_delta,
+            fonte_di5,
+        )
 
-        if di_5_taxa is not None and (di_5_delta is None or fonte_di5 == "none"):
-            delta_d1 = _delta_di_vs_d1(df_hist, ticker_di5, di_5_taxa)
-            if delta_d1 is not None:
-                di_5_delta = delta_d1
-                fonte_di5 = "D-1"
+    df_hist = df_hist.copy()
 
-        # 2b) Fallback TOTAL: snapshot falhou (ou veio vazio) → usamos o
-        #     último dia disponível no histórico para nível + delta.
-        if ticker_di2 is None or di_2_taxa is None or ticker_di5 is None or di_5_taxa is None:
-            # último dia com dados
-            ultima_data_hist = df_hist["data"].max()
-            df_ult = df_hist[df_hist["data"] == ultima_data_hist].copy()
+    # Garante que a coluna data é tipo date
+    if not pd.api.types.is_datetime64_any_dtype(df_hist["data"]):
+        df_hist["data"] = pd.to_datetime(df_hist["data"], errors="coerce")
+    df_hist["data"] = df_hist["data"].dt.date
 
-            # 2 anos
-            if ticker_di2 is None or di_2_taxa is None:
-                tk2, taxa2, _ = _escolher_di_por_prazo(df_ult, anos_alvo=2.0)
-                if ticker_di2 is None:
-                    ticker_di2 = tk2
-                if di_2_taxa is None:
-                    di_2_taxa = taxa2
+    # 2) Usa o ÚLTIMO dia disponível no histórico como "nível atual"
+    ultima_data_hist = df_hist["data"].max()
+    df_ult = df_hist[df_hist["data"] == ultima_data_hist].copy()
 
-                if di_2_taxa is not None and ticker_di2 is not None:
-                    delta_d1 = _delta_di_vs_d1(df_hist, ticker_di2, di_2_taxa)
-                    if delta_d1 is not None:
-                        di_2_delta = delta_d1
-                        fonte_di2 = "D-1"
+    if df_ult.empty:
+        return (
+            ticker_di2,
+            di_2_taxa,
+            di_2_delta,
+            fonte_di2,
+            ticker_di5,
+            di_5_taxa,
+            di_5_delta,
+            fonte_di5,
+        )
 
-            # 5 anos
-            if ticker_di5 is None or di_5_taxa is None:
-                tk5, taxa5, _ = _escolher_di_por_prazo(df_ult, anos_alvo=5.0)
-                if ticker_di5 is None:
-                    ticker_di5 = tk5
-                if di_5_taxa is None:
-                    di_5_taxa = taxa5
+    # 3) Escolhe o contrato mais próximo de 2 anos e de 5 anos
+    #    usando apenas esse último dia (df_ult)
+    ticker_di2, di_2_taxa, _ = _escolher_di_por_prazo(df_ult, anos_alvo=2.0)
+    ticker_di5, di_5_taxa, _ = _escolher_di_por_prazo(df_ult, anos_alvo=5.0)
 
-                if di_5_taxa is not None and ticker_di5 is not None:
-                    delta_d1 = _delta_di_vs_d1(df_hist, ticker_di5, di_5_taxa)
-                    if delta_d1 is not None:
-                        di_5_delta = delta_d1
-                        fonte_di5 = "D-1"
+    # 4) Calcula delta vs D-1 usando o próprio histórico
+    if ticker_di2 is not None and di_2_taxa is not None:
+        delta_2 = _delta_di_vs_d1(df_hist, ticker_di2, di_2_taxa)
+        if delta_2 is not None:
+            di_2_delta = delta_2
+            fonte_di2 = "D-1"
 
-    # 3) Sempre retorna alguma coisa (mesmo que seja tudo None)
+    if ticker_di5 is not None and di_5_taxa is not None:
+        delta_5 = _delta_di_vs_d1(df_hist, ticker_di5, di_5_taxa)
+        if delta_5 is not None:
+            di_5_delta = delta_5
+            fonte_di5 = "D-1"
+
+
     return (
         ticker_di2,
         di_2_taxa,
@@ -974,6 +958,7 @@ def _carregar_di_futuro_2e5_anos() -> Tuple[
         di_5_delta,
         fonte_di5,
     )
+
 
 def atualizar_cache_curto_prazo() -> None:
     """

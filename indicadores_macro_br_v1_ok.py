@@ -19,9 +19,11 @@ from di_futuro_b3 import carregar_historico_di_futuro
 from caged_saldo_brasil import carregar_caged_saldo_csv, atualizar_caged_saldo_brasil_csv
 
 from risco_brasil_spread_10y import (
-    atualizar_spread_10y, 
+    atualizar_spread_10y,
     carregar_risco_brasil_spread_10y,
+    CSV_SPREAD,
 )
+
 from bloco_curto_prazo_br import (
     render_bloco_curto_prazo_br,
     metric_card,
@@ -2800,29 +2802,124 @@ def carregar_risco_brasil_embi() -> Tuple[Optional[float], Optional[float], Opti
 
     return risco_nivel, risco_delta_aa, referencia, risco_media_12m
 
+def selecionar_contrato_di_5_anos(
+    df_hist_di: Optional[pd.DataFrame],
+    horizonte_anos: float = 5.0,
+) -> Optional[Dict[str, object]]:
+    """
+    A partir do histórico de DI futuro (di1_historico.csv),
+    escolhe o contrato cujo vencimento está mais próximo de `horizonte_anos`
+    anos à frente da última data disponível.
+
+    Retorna um dicionário com:
+      - ticker
+      - data_ref (último pregão)
+      - vencimento
+      - taxa_atual
+      - taxa_d_1
+      - taxa_inicio_ano
+      - df_ticker (histórico só desse contrato, ordenado por data)
+    """
+    if df_hist_di is None or df_hist_di.empty:
+        return None
+
+    df = df_hist_di.copy()
+
+    try:
+        df["data"] = pd.to_datetime(df["data"], errors="coerce")
+    except Exception:
+        return None
+
+    if "vencimento" not in df.columns:
+        return None
+
+    try:
+        df["vencimento"] = pd.to_datetime(df["vencimento"], errors="coerce")
+    except Exception:
+        return None
+
+    df = df.dropna(subset=["data", "vencimento", "taxa", "ticker"])
+    if df.empty:
+        return None
+
+    # última data do histórico
+    data_ref = df["data"].max().normalize()
+
+    df_ref = df[df["data"] == data_ref].copy()
+    if df_ref.empty:
+        return None
+
+    # anos até o vencimento
+    dias_ate_venc = (df_ref["vencimento"] - data_ref).dt.days
+    df_ref["anos_ate_venc"] = dias_ate_venc / 365.25
+    df_ref = df_ref[df_ref["anos_ate_venc"] > 0]
+    if df_ref.empty:
+        return None
+
+    # escolhe o contrato cujo prazo está mais perto de 5 anos
+    idx_sel = (df_ref["anos_ate_venc"] - horizonte_anos).abs().idxmin()
+    linha_sel = df_ref.loc[idx_sel]
+
+    ticker = str(linha_sel["ticker"])
+
+    # histórico apenas desse ticker
+    df_ticker = df[df["ticker"] == ticker].copy()
+    df_ticker = df_ticker.sort_values("data")
+    df_ticker = df_ticker.dropna(subset=["taxa"])
+    if df_ticker.empty:
+        return None
+
+    linha_ult = df_ticker.iloc[-1]
+    taxa_atual = float(linha_ult["taxa"])
+    data_ult = linha_ult["data"]
+
+    # D-1 (mesmo contrato, pregão anterior)
+    taxa_d_1 = None
+    if len(df_ticker) >= 2:
+        taxa_d_1 = float(df_ticker.iloc[-2]["taxa"])
+
+    # taxa no início do ano
+    ano_ref = data_ult.year
+    primeiro_dia_ano = datetime(ano_ref, 1, 1)
+    df_ano = df_ticker[df_ticker["data"] >= primeiro_dia_ano]
+    taxa_inicio_ano = float(df_ano.iloc[0]["taxa"]) if not df_ano.empty else None
+
+    return {
+        "ticker": ticker,
+        "data_ref": data_ult.date() if hasattr(data_ult, "date") else data_ult,
+        "vencimento": (
+            linha_sel["vencimento"].date()
+            if not pd.isna(linha_sel["vencimento"])
+            else None
+        ),
+        "taxa_atual": taxa_atual,
+        "taxa_d_1": taxa_d_1,
+        "taxa_inicio_ano": taxa_inicio_ano,
+        "df_ticker": df_ticker,
+    }
+
 
 @lru_cache(maxsize=1)
 def obter_referencia_di_futuro() -> Optional[str]:
-    """Retorna a data de referência da curva DI Futuro (última data do histórico),
-    formatada como 'dd/mm/aaaa', ou None se não for possível carregar.
+    """
+    Data de referência do DI Futuro ~5 anos:
+    último pregão do contrato escolhido em selecionar_contrato_di_5_anos.
     """
     try:
         df_di = carregar_historico_di_futuro()
     except Exception:
         return None
 
-    if df_di is None or df_di.empty:
+    selecao = selecionar_contrato_di_5_anos(df_di)
+    if not selecao:
         return None
 
-    # a coluna 'data' já vem como date em di_futuro_b3, mas garantimos aqui
-    data_ult = df_di["data"].max()
-    if hasattr(data_ult, "date"):
-        data_ult = data_ult.date()
-
+    data_ref = selecao["data_ref"]
     try:
-        return data_ult.strftime("%d/%m/%Y")
+        return data_ref.strftime("%d/%m/%Y")
     except Exception:
         return None
+
     
 @lru_cache(maxsize=1)
 def obter_referencia_ptax() -> Optional[str]:
@@ -2942,7 +3039,7 @@ def render_bloco_termometro_macro_br() -> None:
     ipca_focus_mensal = resumo_ipca.get("focus_mensal")
     ipca_surpresa_mensal = resumo_ipca.get("surpresa_mensal")
 
-    st.markdown("#### Termômetro macro – Brasil")
+    st.markdown("#### Termômetro Macro – Brasil")
 
     # =====================================================
     # LINHA 1
@@ -3011,17 +3108,42 @@ def render_bloco_termometro_macro_br() -> None:
 
     # 2) DI Futuro ~5 anos (ex.: DI Jan/31)
     with col2:
-        di5_taxa = getattr(ativos, "di_5_anos_taxa", None) if ativos is not None else None
-        di5_delta = getattr(ativos, "di_5_anos_delta", None) if ativos is not None else None
-        di5_fonte = (
-            getattr(ativos, "di_5_anos_fonte_delta", None) if ativos is not None else None
-        )
-        di5_ticker = (
-            getattr(ativos, "di_5_anos_ticker", None) if ativos is not None else None
-        )
-        di5_delta_ano = (
-            getattr(ativos, "di_5_anos_delta_ano", None) if ativos is not None else None
-        )
+        # tenta extrair tudo direto do histórico da B3 (CSV local)
+        selecao_di5 = None
+        try:
+            df_hist_di = carregar_historico_di_futuro()
+            selecao_di5 = selecionar_contrato_di_5_anos(df_hist_di)
+        except Exception:
+            selecao_di5 = None
+
+        if selecao_di5:
+            di5_taxa = selecao_di5["taxa_atual"]
+            taxa_d_1 = selecao_di5["taxa_d_1"]
+            taxa_inicio_ano = selecao_di5["taxa_inicio_ano"]
+            di5_ticker = selecao_di5["ticker"]
+
+            di5_delta = None
+            if (di5_taxa is not None) and (taxa_d_1 is not None):
+                di5_delta = di5_taxa - taxa_d_1
+
+            di5_delta_ano = None
+            if (di5_taxa is not None) and (taxa_inicio_ano is not None):
+                di5_delta_ano = di5_taxa - taxa_inicio_ano
+
+            di5_fonte = "Curva DI Futuro B3 (CSV local)"
+        else:
+            # fallback: usa os valores calculados em dados_curto_prazo_br
+            di5_taxa = getattr(ativos, "di_5_anos_taxa", None) if ativos is not None else None
+            di5_delta = getattr(ativos, "di_5_anos_delta", None) if ativos is not None else None
+            di5_fonte = (
+                getattr(ativos, "di_5_anos_fonte_delta", None) if ativos is not None else None
+            )
+            di5_ticker = (
+                getattr(ativos, "di_5_anos_ticker", None) if ativos is not None else None
+            )
+            di5_delta_ano = (
+                getattr(ativos, "di_5_anos_delta_ano", None) if ativos is not None else None
+            )
 
         # título no padrão pedido: "DI1N29 (B3) vs d-1"
         if di5_ticker:
@@ -3029,10 +3151,11 @@ def render_bloco_termometro_macro_br() -> None:
         else:
             titulo_di5 = "DI Futuro ~5 anos (B3) vs d-1"
 
-        # badge no canto direito: data de referência da curva DI (última data do histórico)
+        # badge: última data do contrato escolhido
         di5_referencia = obter_referencia_di_futuro()
         badge_di5 = di5_referencia or "VS D-1"
 
+        # subtexto: resumo desde início do ano
         subtext_di5 = None
         if di5_delta_ano is not None:
             if abs(di5_delta_ano) < 0.01:
@@ -3049,27 +3172,27 @@ def render_bloco_termometro_macro_br() -> None:
                     + _format_delta_br(abs(di5_delta_ano), 2)
                     + " p.p. desde o início do ano"
                 )
-                    # texto do botão "i" (tooltip), explicando a data do canto superior direito
-            if di5_referencia:
-                info_di5 = (
-                    f"A data no canto superior direito ({badge_di5}) indica o "
-                    "último pregão com dado disponível para o contrato de DI "
-                    "mostrado no título do card. "
-                    "O valor principal é a taxa anualizada desse DI futuro e a seta "
-                    "mostra a variação, em pontos percentuais, em relação ao "
-                    "fechamento do dia útil anterior (D-1). "
-                    "O texto abaixo resume quanto essa taxa abriu ou fechou, em "
-                    "pontos percentuais, desde o início do ano."
-                )
-            else:
-                info_di5 = (
-                    "Este card mostra a taxa anualizada de um contrato de DI futuro "
-                    "(~5 anos). A seta compara a taxa de hoje com o fechamento do "
-                    "dia útil anterior (D-1). Quando houver dado atualizado, a data "
-                    "no canto superior direito passará a indicar o último pregão "
-                    "com informação disponível."
-                )
 
+        # texto do botão "i"
+        if di5_referencia:
+            info_di5 = (
+                f"A data no canto superior direito ({badge_di5}) indica o "
+                "último pregão com dado disponível para o contrato de DI "
+                "mostrado no título do card. "
+                "O valor principal é a taxa anualizada desse DI futuro e a seta "
+                "mostra a variação, em pontos percentuais, em relação ao "
+                "fechamento do dia útil anterior (D-1). "
+                "O texto abaixo resume quanto essa taxa abriu ou fechou, em "
+                "pontos percentuais, desde o início do ano."
+            )
+        else:
+            info_di5 = (
+                "Este card mostra a taxa anualizada de um contrato de DI futuro "
+                "(~5 anos). A seta compara a taxa de hoje com o fechamento do "
+                "dia útil anterior (D-1). Quando houver dado atualizado, a data "
+                "no canto superior direito passará a indicar o último pregão "
+                "com informação disponível."
+            )
 
         metric_card(
             label=titulo_di5,
@@ -3083,6 +3206,7 @@ def render_bloco_termometro_macro_br() -> None:
             subtext=subtext_di5,
             info_text=info_di5,
         )
+
 
     # 3) IPCA – variação mensal (mesmo padrão do Curto Prazo)
     with col3:
@@ -3891,62 +4015,6 @@ def render_bloco1_observatorio_mercado(
                 #ipca_referencia=ipca_referencia,
             #)
 
-            # Linha separadora opcional
-            st.markdown("---")
-
-            # Título só para os QUADROS abaixo (tabelas)
-            st.markdown("### Outros indicadores de curto prazo – Brasil")
-            st.caption(
-                "Quadros detalhados com Selic meta, CDI acumulado, câmbio PTAX e "
-                "Ibovespa, complementando os cards acima."
-            )
-
-            # Selic
-            st.markdown("**Taxa básica – Selic Meta**")
-            st.table(df_selic.set_index("Indicador"))
-
-            # CDI
-            st.markdown("**CDI – Retorno acumulado**")
-            st.table(df_cdi.set_index("Indicador"))
-
-            # Câmbio
-            st.markdown("**Câmbio – Dólar PTAX (venda)**")
-            st.table(df_ptax.set_index("Indicador"))
-
-            # Bolsa
-            st.markdown("**Bolsa – Ibovespa (fechamento)**")
-            st.table(df_ibov_curto.set_index("Indicador"))
-
-            # Inflação
-            st.markdown("**Inflação – IPCA**")
-
-            if ipca_mensal is not None:
-                valor_mensal_str = f"{ipca_mensal:.2f}%"
-                valor_ano_str = (
-                    f"{ipca_acum_ano:.2f}%" if ipca_acum_ano is not None else "-"
-                )
-                valor_12m_str = (
-                    f"{ipca_acum_12m:.2f}%" if ipca_acum_12m is not None else "-"
-                )
-            else:
-                valor_mensal_str = "sem dados"
-                valor_ano_str = "-"
-                valor_12m_str = "-"
-
-            df_ipca_curto = pd.DataFrame(
-                [
-                    {
-                        "Indicador": "IPCA (variação mensal)",
-                        "Data ref.": ipca_referencia or "-",
-                        "Variação mensal": valor_mensal_str,
-                        "Acum. no ano": valor_ano_str,
-                        "Acum. 12 meses": valor_12m_str,
-                        "Fonte": "IBGE / SIDRA (Tabela 1737)",
-                    }
-                ]
-            )
-            st.table(df_ipca_curto.set_index("Indicador"))
-
 
         # -------- Curvas & Tesouro BR --------
         with subtab_curvas_tesouro:
@@ -4202,200 +4270,283 @@ def render_bloco1_observatorio_mercado(
                     st.warning(
                         f"Não foi possível carregar a comparação Tesouro x Curva ANBIMA: {e}"
                     )
-            # ---------------------------------------------
-            # Histórico – DI Futuro (B3) – 1 contrato por ano, próximos 10 anos
-            # ---------------------------------------------
-            st.markdown("**Histórico – DI Futuro (B3)**")
-            with st.expander(
-                "Ver curva DI Futuro (1 contrato por ano, próximos 10 anos)"
-            ):
-                if df_hist_di is None or df_hist_di.empty:
-                    st.info(
-                        "Ainda não há histórico salvo de DI Futuro. "
-                        "Certifique-se de rodar o app em dias úteis para ir "
-                        "acumulando as observações no arquivo "
-                        "`data/di_futuro/di1_historico.csv`."
-                    )
-                else:
-                    # cópia ordenada por data
-                    df_hist = df_hist_di.copy()
-                    df_hist["data"] = pd.to_datetime(df_hist["data"])
-                    df_hist = df_hist.sort_values("data")
-
-                    # garante coluna de volume numérica (se existir)
-                    if "volume" in df_hist.columns:
-                        df_hist["volume"] = pd.to_numeric(
-                            df_hist["volume"], errors="coerce"
-                        )
-                    else:
-                        df_hist["volume"] = pd.NA
-
-                    # Trata taxa / ajuste → cria 'taxa_final'
-                    df_hist["taxa"] = pd.to_numeric(
-                        df_hist.get("taxa"), errors="coerce"
-                    )
-                    if "ajuste" in df_hist.columns:
-                        df_hist["ajuste"] = pd.to_numeric(
-                            df_hist.get("ajuste"), errors="coerce"
-                        )
-                        df_hist["taxa_final"] = df_hist["taxa"].fillna(
-                            df_hist["ajuste"]
-                        )
-                    else:
-                        df_hist["taxa_final"] = df_hist["taxa"]
-
-                    # Extrai o ano de vencimento do ticker (ex.: DI1F26 -> 2026)
-                    def _extrair_ano(ticker: str) -> Optional[int]:
-                        if not isinstance(ticker, str) or len(ticker) < 2:
-                            return None
-                        sufixo = ticker[-2:]
-                        if sufixo.isdigit():
-                            return 2000 + int(sufixo)
-                        return None
-
-                    df_hist["ano_venc"] = df_hist["ticker"].apply(_extrair_ano)
-
-                    # Ano de referência = ano da última data observada
-                    ano_ref = int(df_hist["data"].max().year)
-                    # próximos 10 anos (ano_ref, ano_ref+1, ..., ano_ref+9)
-                    anos_desejados = [ano_ref + i for i in range(10)]
-
-                    # Ordem dos meses da B3 (pra fallback de liquidez)
-                    ordem_meses = "FGHJKMNQUVXZ"
-
-                    # Para cada ano desejado, escolhe um contrato representativo
-                    contratos_escolhidos = []
-                    for ano in anos_desejados:
-                        subset = df_hist[df_hist["ano_venc"] == ano]
-                        if subset.empty:
-                            continue
-
-                        # Pega só a última data de cada contrato
-                        subset = subset.sort_values(["ticker", "data"])
-                        subset_ult = subset.groupby("ticker").tail(1)
-
-                        # Escolhe o contrato com maior volume; se empate, usa ordem_meses
-                        subset_ult = subset_ult.copy()
-                        subset_ult["volume"] = subset_ult["volume"].fillna(0)
-
-                        # separa mês-letra
-                        subset_ult["mes_letra"] = subset_ult["ticker"].str[-3:-2]
-
-                        def _ordem_mes(letra: str) -> int:
-                            try:
-                                return ordem_meses.index(letra)
-                            except ValueError:
-                                return len(ordem_meses)
-
-                        subset_ult["ordem_mes"] = subset_ult["mes_letra"].apply(_ordem_mes)
-
-                        subset_ult = subset_ult.sort_values(
-                            ["volume", "ordem_mes"], ascending=[False, True]
-                        )
-
-                        contrato_escolhido = subset_ult.iloc[0]
-                        contratos_escolhidos.append(contrato_escolhido)
-
-                    if not contratos_escolhidos:
-                        st.info(
-                            "Não foi possível selecionar contratos representativos de DI Futuro."
-                        )
-                    else:
-                        df_curva_hoje = pd.DataFrame(contratos_escolhidos)
-
-                        # Ordena por ano de vencimento
-                        df_curva_hoje = df_curva_hoje.sort_values("ano_venc")
-
-                        st.markdown(
-                            "Tabela – 1 contrato de DI Futuro por ano (próximos 10 anos)"
-                        )
-                        df_resumo_curva = (
-                            df_curva_hoje[["ticker", "ano_venc", "data", "taxa_final"]]
-                            .assign(
-                                Ano_venc=lambda d: d["ano_venc"].astype(int).astype(str),
-                                Data=lambda d: d["data"].dt.strftime("%d/%m/%Y"),
-                                Taxa=lambda d: d["taxa_final"].map(
-                                    lambda v: f"{v:.4f}%"
-                                ),
-                            )[["ticker", "Ano_venc", "Data", "Taxa"]]
-                            .rename(
-                                columns={
-                                    "ticker": "Contrato",
-                                    "Ano_venc": "Ano venc.",
-                                }
-                            )
-                            .set_index("Contrato")
-                        )
-                        st.table(df_resumo_curva)
 
         # -------- Expectativas BR --------
         with subtab_exp_br:
-            st.markdown("### Expectativas de mercado – Brasil (Focus)")
 
-            # descobre a data mais recente nas bases do Focus (Mediana e Top5)
-            try:
-                df_raw_focus = _carregar_focus_raw()
-                data_mediana = (
-                    df_raw_focus["Data"].max()
-                    if not df_raw_focus.empty
-                    else None
+            # Título só para os QUADROS abaixo (tabelas)
+            st.markdown("### Histórico de Indicadores – Brasil")
+            st.caption(
+                "Quadros complementares aos indicadores do Painel Brasil."
+            )
+
+            # Selic
+            st.markdown("**Taxa básica – Selic Meta**")
+            st.table(df_selic.set_index("Indicador"))
+
+            # CDI
+            st.markdown("**CDI – Retorno acumulado**")
+            st.table(df_cdi.set_index("Indicador"))
+
+            # Câmbio
+            st.markdown("**Câmbio – Dólar PTAX (venda)**")
+            st.table(df_ptax.set_index("Indicador"))
+
+            # Bolsa
+            st.markdown("**Bolsa – Ibovespa (fechamento)**")
+            st.table(df_ibov_curto.set_index("Indicador"))
+
+            # Inflação
+            st.markdown("**Inflação – IPCA**")
+
+            if ipca_mensal is not None:
+                valor_mensal_str = f"{ipca_mensal:.2f}%"
+                valor_ano_str = (
+                    f"{ipca_acum_ano:.2f}%" if ipca_acum_ano is not None else "-"
                 )
-            except Exception:
-                data_mediana = None
-
-            try:
-                df_raw_top5 = _carregar_focus_top5_raw()
-                data_top5 = (
-                    df_raw_top5["Data"].max()
-                    if not df_raw_top5.empty
-                    else None
-                )
-            except Exception:
-                data_top5 = None
-
-            # funçãozinha auxiliar para formatar a data em texto
-            def _fmt_data(d):
-                if d is None or pd.isna(d):
-                    return "sem data disponível"
-                try:
-                    return pd.to_datetime(d).strftime("%d/%m/%Y")
-                except Exception:
-                    return str(d)
-
-            data_mediana_txt = _fmt_data(data_mediana)
-            data_top5_txt = _fmt_data(data_top5)
-
-            st.markdown("**Focus – Mediana (consenso do mercado)**")
-            st.caption(
-                f"Mediana das projeções de todas as instituições participantes "
-                f"do boletim Focus. Dados de {data_mediana_txt}."
-            )
-            st.table(df_focus.set_index("Indicador"))
-
-            st.markdown("**Focus – Top 5 (instituições mais assertivas)**")
-            st.caption(
-                f"Mediana das projeções das 5 instituições com melhor "
-                f"desempenho histórico no Focus. Dados de {data_top5_txt}."
-            )
-            st.table(df_focus_top5.set_index("Indicador"))
-
-            # --- Nova tabela: expectativas mensais para o próximo mês ---
-            df_focus_mensal_prox, mes_prox_txt, data_mensal_txt = (
-                montar_tabela_focus_mensal_proximo_mes()
-            )
-
-            st.markdown("**Focus – Expectativas mensais para o próximo mês**")
-            st.caption(
-                "Mediana das projeções mensais para o próximo mês-calendário "
-                f"(mês de referência: {mes_prox_txt}). "
-                f"Dados do boletim Focus de {data_mensal_txt}."
-            )
-            if df_focus_mensal_prox.empty:
-                st.info(
-                    "Ainda não há expectativas mensais disponíveis para o próximo mês."
+                valor_12m_str = (
+                    f"{ipca_acum_12m:.2f}%" if ipca_acum_12m is not None else "-"
                 )
             else:
-                st.table(df_focus_mensal_prox.set_index("Indicador"))
+                valor_mensal_str = "sem dados"
+                valor_ano_str = "-"
+                valor_12m_str = "-"
+
+            df_ipca_curto = pd.DataFrame(
+                [
+                    {
+                        "Indicador": "IPCA (variação mensal)",
+                        "Data ref.": ipca_referencia or "-",
+                        "Variação mensal": valor_mensal_str,
+                        "Acum. no ano": valor_ano_str,
+                        "Acum. 12 meses": valor_12m_str,
+                        "Fonte": "IBGE / SIDRA (Tabela 1737)",
+                    }
+                ]
+            )
+            st.table(df_ipca_curto.set_index("Indicador"))
+
+            # DI Futuro – contrato ~5 anos (B3)
+            st.markdown("**DI Futuro – contrato ~5 anos (B3)**")
+
+            if df_hist_di is None or df_hist_di.empty:
+                st.info(
+                    "Ainda não há histórico salvo de DI Futuro. "
+                    "Rode o app em dias úteis para ir acumulando observações em "
+                    "`data/di_futuro/di1_historico.csv`."
+                )
+            else:
+                try:
+                    df_di = df_hist_di.copy()
+                except Exception:
+                    st.info("Não foi possível tratar o histórico de DI Futuro.")
+                else:
+                    selecao = selecionar_contrato_di_5_anos(df_di)
+                    if not selecao:
+                        st.info(
+                            "Não foi possível encontrar um contrato de DI Futuro "
+                            "com vencimento em torno de 5 anos à frente."
+                        )
+                    else:
+                        ticker_alvo = selecao["ticker"]
+                        df_di_ticker = selecao["df_ticker"].copy()
+
+                        # garante coluna data como date
+                        df_di_ticker["data"] = pd.to_datetime(
+                            df_di_ticker["data"], errors="coerce"
+                        ).dt.date
+                        df_di_ticker = df_di_ticker.dropna(subset=["data", "taxa"])
+
+                        if df_di_ticker.empty:
+                            st.info(
+                                f"Não encontrei histórico para o contrato {ticker_alvo} "
+                                "em `di1_historico.csv`."
+                            )
+                        else:
+                            df_di_ticker = df_di_ticker.sort_values("data")
+
+                            # última data disponível (Data ref.)
+                            data_ref = df_di_ticker["data"].max()
+                            taxa_atual = float(
+                                df_di_ticker.loc[
+                                    df_di_ticker["data"] == data_ref, "taxa"
+                                ].iloc[-1]
+                            )
+
+                            # taxa há 1 semana
+                            data_1sem = data_ref - timedelta(days=7)
+                            df_sem = df_di_ticker[
+                                (df_di_ticker["data"] >= data_1sem)
+                                & (df_di_ticker["data"] <= data_ref)
+                            ]
+                            taxa_1sem = (
+                                float(df_sem.sort_values("data").iloc[0]["taxa"])
+                                if not df_sem.empty
+                                else None
+                            )
+
+                            # taxa no início do mês
+                            primeiro_dia_mes = data_ref.replace(day=1)
+                            df_mes = df_di_ticker[
+                                (df_di_ticker["data"] >= primeiro_dia_mes)
+                                & (df_di_ticker["data"] <= data_ref)
+                            ]
+                            taxa_inicio_mes = (
+                                float(df_mes.sort_values("data").iloc[0]["taxa"])
+                                if not df_mes.empty
+                                else None
+                            )
+
+                            # variações em p.p.
+                            var_sem = (
+                                taxa_atual - taxa_1sem
+                                if taxa_1sem is not None
+                                else None
+                            )
+                            var_mes = (
+                                taxa_atual - taxa_inicio_mes
+                                if taxa_inicio_mes is not None
+                                else None
+                            )
+
+                            def _fmt_pct(v):
+                                if v is None or (isinstance(v, float) and pd.isna(v)):
+                                    return "-"
+                                return f"{v:.2f}% a.a."
+
+                            def _fmt_pp(v):
+                                if v is None or (isinstance(v, float) and pd.isna(v)):
+                                    return "-"
+                                sinal = "+" if v > 0 else ""
+                                return f"{sinal}{v:.2f} p.p."
+
+                            linha_di = {
+                                "Indicador": f"{ticker_alvo} (B3) – taxa DI Futuro ~5 anos",
+                                "Data ref.": data_ref.strftime("%d/%m/%Y"),
+                                "Taxa atual": _fmt_pct(taxa_atual),
+                                "Taxa há 1 sem": _fmt_pct(taxa_1sem),
+                                "Início do mês": _fmt_pct(taxa_inicio_mes),
+                                "Var. sem": _fmt_pp(var_sem),
+                                "Var. mês": _fmt_pp(var_mes),
+                                "Fonte": "Curva DI Futuro B3 (CSV local)",
+                            }
+
+                            df_di_curto = pd.DataFrame([linha_di])
+                            st.table(df_di_curto.set_index("Indicador"))
+
+
+            # --- CAGED (saldo de empregos formais) ---
+            st.markdown("**Mercado de Trabalho – CAGED (saldo de empregos formais)**")
+
+            resumo_caged = resumo_caged_saldo_novo()
+
+            # se não conseguiu carregar (None em tudo), mostra aviso
+            if resumo_caged.get("saldo_atual") is None:
+                st.info("Não foi possível carregar o resumo do CAGED.")
+            else:
+                # helper para deixar tudo em 'mil vagas' com formatação BR
+                def _fmt_saldo_mil(v: float | None) -> str:
+                    if v is None:
+                        return "-"
+                    valor_mil = v / 1_000.0
+                    return _format_br_number(valor_mil, 1) + " mil"
+
+                linha_caged = {
+                    "Indicador": "CAGED – saldo de empregos formais",
+                    "Data ref.": resumo_caged.get("referencia") or "-",
+                    "Saldo atual": _fmt_saldo_mil(resumo_caged.get("saldo_atual")),
+                    "Saldo há 12m": _fmt_saldo_mil(resumo_caged.get("saldo_12m")),
+                    "Saldo há 24m": _fmt_saldo_mil(resumo_caged.get("saldo_24m")),
+                    "Δ vs 12m": _fmt_saldo_mil(resumo_caged.get("delta_12m")),
+                    "Média 5 anos (mesmo mês)": _fmt_saldo_mil(
+                        resumo_caged.get("media_mes_5anos")
+                    ),
+                    "Fonte": "Novo CAGED – Ministério do Trabalho",
+                }
+
+                df_caged_curto = pd.DataFrame([linha_caged])
+                st.table(df_caged_curto.set_index("Indicador"))
+
+            # --- Risco-País – spread 10Y (Brasil/USA) ---
+            st.markdown("**Risco-País – spread 10Y (Brasil/USA)**")
+
+            (
+                nivel_atual,
+                _delta_aa,
+                referencia,
+                _media_12m,
+                _delta_d1,
+                inicio_mes,
+                data_inicio_mes,
+            ) = carregar_risco_brasil_spread_10y()
+
+            if nivel_atual is None:
+                st.info("Não foi possível carregar o spread 10Y Brasil/USA para o histórico.")
+            else:
+                # Lê o CSV completo para calcular o nível há 1 semana
+                try:
+                    df_risco = pd.read_csv(CSV_SPREAD)
+                    df_risco["data"] = pd.to_datetime(
+                        df_risco["data"], errors="coerce"
+                    ).dt.date
+                    df_risco = df_risco.dropna(subset=["data", "spread_pb"]).copy()
+                    df_risco = df_risco.sort_values("data").reset_index(drop=True)
+                except Exception:
+                    df_risco = pd.DataFrame()
+
+                if df_risco.empty:
+                    st.info(
+                        "Não foi possível carregar o histórico detalhado do spread 10Y."
+                    )
+                else:
+                    data_ult = df_risco.iloc[-1]["data"]
+
+                    # alvo: 1 semana atrás
+                    alvo_sem = data_ult - timedelta(days=7)
+                    df_sem = df_risco[df_risco["data"] <= alvo_sem]
+
+                    nivel_1sem = (
+                        float(df_sem.iloc[-1]["spread_pb"]) if not df_sem.empty else None
+                    )
+
+                    # variações
+                    var_sem = (
+                        float(nivel_atual - nivel_1sem)
+                        if (nivel_1sem is not None)
+                        else None
+                    )
+                    var_mes = (
+                        float(nivel_atual - inicio_mes)
+                        if (inicio_mes is not None)
+                        else None
+                    )
+
+                    # helpers de formatação
+                    def _fmt_nivel_pb(v: float | None) -> str:
+                        if v is None:
+                            return "-"
+                        return f"{int(round(v))} p.b."
+
+                    def _fmt_var_pb(v: float | None) -> str:
+                        if v is None:
+                            return "-"
+                        n = int(round(v))
+                        sinal = "+" if n > 0 else ""
+                        return f"{sinal}{n} p.b."
+
+                    linha_risco = {
+                        "Indicador": "Spread 10Y Brasil/USA",
+                        "Data ref.": referencia or data_ult.strftime("%d/%m/%Y"),
+                        "Nível atual": _fmt_nivel_pb(nivel_atual),
+                        "Nível há 1 sem": _fmt_nivel_pb(nivel_1sem),
+                        "Início do mês": _fmt_nivel_pb(inicio_mes),
+                        "Var. sem": _fmt_var_pb(var_sem),
+                        "Var. mês": _fmt_var_pb(var_mes),  # vs início do mês
+                        "Fonte": "Curva soberana BR10Y – US10Y (CSV local)",
+                    }
+
+                    df_risco_curto = pd.DataFrame([linha_risco])
+                    st.table(df_risco_curto.set_index("Indicador"))
 
 
 
@@ -4508,6 +4659,82 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
         "(PMI, confiança FGV) e defasados (desemprego, massa salarial), "
         "todos com a mesma lógica de classificação cíclica."
     )
+
+
+def render_bloco_expectativas_focus(
+    df_focus: pd.DataFrame,
+    df_focus_top5: pd.DataFrame,
+):
+    """Bloco de expectativas de mercado (Focus) – Brasil."""
+
+    st.markdown("### Expectativas de mercado – Brasil (Focus)")
+
+    # descobre a data mais recente nas bases do Focus (Mediana e Top5)
+    try:
+        df_raw_focus = _carregar_focus_raw()
+        data_mediana = (
+            df_raw_focus["Data"].max()
+            if not df_raw_focus.empty
+            else None
+        )
+    except Exception:
+        data_mediana = None
+
+    try:
+        df_raw_top5 = _carregar_focus_top5_raw()
+        data_top5 = (
+            df_raw_top5["Data"].max()
+            if not df_raw_top5.empty
+            else None
+        )
+    except Exception:
+        data_top5 = None
+
+    # funçãozinha auxiliar p/ formatar a data em texto
+    def _fmt_data(d):
+        if d is None or pd.isna(d):
+            return "sem data disponível"
+        try:
+            return pd.to_datetime(d).strftime("%d/%m/%Y")
+        except Exception:
+            return str(d)
+
+    data_mediana_txt = _fmt_data(data_mediana)
+    data_top5_txt = _fmt_data(data_top5)
+
+    # ---------- Focus – Mediana ----------
+    st.markdown("**Focus – Mediana (consenso do mercado)**")
+    st.caption(
+        "Mediana das projeções de todas as instituições participantes "
+        f"do boletim Focus. Dados de {data_mediana_txt}."
+    )
+    st.table(df_focus.set_index("Indicador"))
+
+    # ---------- Focus – Top 5 ----------
+    st.markdown("**Focus – Top 5 (instituições mais assertivas)**")
+    st.caption(
+        "Mediana das projeções das 5 instituições com melhor "
+        f"desempenho histórico no Focus. Dados de {data_top5_txt}."
+    )
+    st.table(df_focus_top5.set_index("Indicador"))
+
+    # ---------- Focus – expectativas mensais p/ próximo mês ----------
+    df_focus_mensal_prox, mes_prox_txt, data_mensal_txt = (
+        montar_tabela_focus_mensal_proximo_mes()
+    )
+
+    st.markdown("**Focus – Expectativas mensais para o próximo mês**")
+    st.caption(
+        "Mediana das projeções mensais para o próximo mês-calendário "
+        f"(mês de referência: {mes_prox_txt}). "
+        f"Dados do boletim Focus de {data_mensal_txt}."
+    )
+    if df_focus_mensal_prox.empty:
+        st.info(
+            "Ainda não há expectativas mensais disponíveis para o próximo mês."
+        )
+    else:
+        st.table(df_focus_mensal_prox.set_index("Indicador"))
 
 
 def render_bloco6_inflacao(df_infla: pd.DataFrame):
@@ -4737,7 +4964,11 @@ def main():
 
     with tab6:
         with st.container():
-            render_bloco6_inflacao(df_infla=df_infla)
+            render_bloco_expectativas_focus(
+                df_focus=df_focus,
+                df_focus_top5=df_focus_top5,
+            )
+
 
     with tab7:
         with st.container():
