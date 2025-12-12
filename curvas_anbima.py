@@ -6,6 +6,7 @@ import io
 import re
 from datetime import datetime, timedelta, date
 from typing import Optional, List
+from functools import lru_cache
 
 import pandas as pd
 import requests
@@ -287,6 +288,13 @@ def _extrair_vertice_dia(
 
     df = df.sort_values("PRAZO_DU")
 
+    # se o alvo estiver fora do range da curva, não inventa taxa
+    min_du = df["PRAZO_DU"].min()
+    max_du = df["PRAZO_DU"].max()
+    if alvo_du < min_du or alvo_du > max_du:
+        return None
+
+
     # 1) Se existir prazo exatamente igual
     if alvo_du in df["PRAZO_DU"].values:
         return float(df.loc[df["PRAZO_DU"] == alvo_du, coluna_taxa].iloc[0])
@@ -311,7 +319,7 @@ def _extrair_vertice_dia(
     valor = df.iloc[0][coluna_taxa]
     return float(valor) if pd.notnull(valor) else None
 
-
+@lru_cache(maxsize=1)
 def _carregar_historico_full() -> pd.DataFrame:
     """Carrega o histórico completo de curvas, se existir."""
     try:
