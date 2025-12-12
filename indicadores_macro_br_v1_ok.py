@@ -38,8 +38,9 @@ from dados_curto_prazo_br import carregar_dados_curto_prazo_br
 
 from curvas_anbima import (
     montar_curva_anbima_hoje,
-    montar_curva_anbima_variacoes,
+    montar_curva_anbima_variacoes as _montar_curva_anbima_variacoes_raw,
 )
+
 from di_futuro_b3 import carregar_historico_di_futuro
 from ibovespa_ipea import carregar_historico_ibovespa
 
@@ -90,6 +91,16 @@ def load_theme_css() -> None:
 # =============================================================================
 # HELPER DE REDE COM RETRY
 # =============================================================================
+
+@st.cache_data(ttl=60 * 5)
+def montar_curva_anbima_variacoes_cached(anos: int) -> pd.DataFrame:
+    """
+    Versão cacheada da montar_curva_anbima_variacoes original.
+
+    - anos: vértice da curva (1, 2, 3, ... 9)
+    - retorna o mesmo DataFrame da função original
+    """
+    return _montar_curva_anbima_variacoes_raw(anos)
 
 
 def _get_with_retry(
@@ -3937,9 +3948,10 @@ def render_bloco1_observatorio_mercado(
     # ABA BRASIL
     # ==========================
     with tab_br:
-        subtab_indic_br, subtab_exp_br, subtab_curvas_tesouro = st.tabs(
-            ["Painel", "Histórico", "Avançado"]
+        subtab_indic_br, subtab_exp_br = st.tabs(
+            ["Painel", "Histórico"]
         )
+
 
         # -------- Indicadores BR --------
         with subtab_indic_br:
@@ -4013,263 +4025,8 @@ def render_bloco1_observatorio_mercado(
                 #ipca_surpresa_mensal=ipca_surpresa_mensal,
                 #ipca_focus_mensal=ipca_focus_mensal,
                 #ipca_referencia=ipca_referencia,
-            #)
 
 
-        # -------- Curvas & Tesouro BR --------
-        with subtab_curvas_tesouro:
-            # -------------------------------
-            # Curva de juros – ANBIMA
-            # -------------------------------
-
-            vertices_anos = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30]
-
-            vertice = st.radio(
-                "Vértice (anos)",
-                options=vertices_anos,
-                horizontal=True,
-                index=1,  # 2 anos
-                key="vertice_anbima",
-            )
-
-            df_var = montar_curva_anbima_variacoes(anos=vertice)
-
-            if df_var.empty:
-                st.info(
-                    "Ainda não há histórico suficiente para esse vértice. "
-                    "Conforme o tempo passar, o painel vai acumulando "
-                    "observações diárias das curvas ANBIMA."
-                )
-            else:
-                col_pref, col_ipca, col_breakeven = st.columns(3)
-
-                def montar_tabela_curva(
-                    df_base: pd.DataFrame,
-                    nome_coluna: str,
-                    titulo: str,
-                ) -> pd.DataFrame:
-                    df_show = (
-                        df_base[["Data", nome_coluna]]
-                        .rename(columns={nome_coluna: titulo})
-                        .set_index("Data")
-                    )
-
-                    df_show[titulo] = df_show[titulo].apply(
-                        lambda x: "-"
-                        if pd.isna(x)
-                        else f"{float(x):.3f}".replace(".", ",")
-                    )
-                    return df_show
-
-                # Tabela 1 – Prefixada (juro nominal)
-                with col_pref:
-                    st.markdown("**Curva prefixada (juro nominal)**")
-                    df_pref = montar_tabela_curva(
-                        df_var,
-                        "Juro Nominal (%)",
-                        "Taxa (% a.a.)",
-                    )
-                    st.table(df_pref)
-
-                # Tabela 2 – IPCA+ (juro real)
-                with col_ipca:
-                    st.markdown("**Curva IPCA+ (juro real)**")
-                    df_ipca = montar_tabela_curva(
-                        df_var,
-                        "Juro Real (%)",
-                        "Taxa (% a.a.)",
-                    )
-                    st.table(df_ipca)
-
-                # Tabela 3 – Breakeven
-                with col_breakeven:
-                    st.markdown("**Breakeven (inflação implícita)**")
-                    df_be = montar_tabela_curva(
-                        df_var,
-                        "Breakeven (%)",
-                        "Taxa (% a.a.)",
-                    )
-                    st.table(df_be)
-
-            # -------------------------------
-            # Oportunidades na curva – Tesouro vs ANBIMA
-            # -------------------------------
-            st.markdown("### Oportunidades na curva – Tesouro vs ANBIMA")
-            st.caption(
-                "Títulos do Tesouro Direto comparados com a curva limpa da dívida pública "
-                "(ANBIMA). Spreads positivos (Barato) indicam que o Tesouro paga acima "
-                "da curva para o mesmo prazo (anos)."
-            )
-
-            with st.spinner("Carregando oportunidades em Tesouro Direto..."):
-                try:
-                    df_pre = get_comparacao_tesouro_pre_vs_curva()
-                    df_ipca = get_comparacao_tesouro_ipca_vs_curva()
-
-                    # Datas de referência
-                    data_tesouro_ref = None
-                    data_curva_ref = None
-                    for df_tmp in (df_pre, df_ipca):
-                        if df_tmp is not None and not df_tmp.empty:
-                            if (
-                                data_tesouro_ref is None
-                                and "data_base_tesouro" in df_tmp.columns
-                            ):
-                                data_tesouro_ref = df_tmp["data_base_tesouro"].iloc[0]
-                            if (
-                                data_curva_ref is None
-                                and "data_curva_anbima" in df_tmp.columns
-                            ):
-                                data_curva_ref = df_tmp["data_curva_anbima"].iloc[0]
-
-                    if (df_pre is None or df_pre.empty) and (
-                        df_ipca is None or df_ipca.empty
-                    ):
-                        st.info(
-                            "Não foi possível carregar oportunidades em Tesouro Direto hoje."
-                        )
-                    else:
-                        # Família (prefixado x IPCA+)
-                        familia_escolhida = st.radio(
-                            "Família de título",
-                            ["Tesouro Prefixado", "Tesouro IPCA+"],
-                            key="familia_tesouro_curva",
-                            horizontal=True,
-                        )
-
-                        if familia_escolhida == "Tesouro Prefixado":
-                            df_base = df_pre.copy()
-                            col_taxa_curva = "taxa_pre_anbima"
-                            label_taxa_curva = "Curva pré ANBIMA (% a.a.)"
-                        else:
-                            df_base = df_ipca.copy()
-                            col_taxa_curva = "taxa_ipca_anbima"
-                            label_taxa_curva = "Curva real ANBIMA (% a.a.)"
-
-                        if df_base is None or df_base.empty:
-                            st.info("Sem dados disponíveis para essa família de títulos.")
-                        else:
-                            # Filtro por sinal
-                            sinais_disponiveis = ["Barato", "No preço", "Caro"]
-                            padrao = {"Barato": True, "No preço": True, "Caro": False}
-
-                            col_s1, col_s2, col_s3 = st.columns(3)
-                            flags = {}
-                            with col_s1:
-                                flags["Barato"] = st.checkbox(
-                                    "Barato",
-                                    value=padrao["Barato"],
-                                    key="chk_barato_curva",
-                                )
-                            with col_s2:
-                                flags["No preço"] = st.checkbox(
-                                    "No preço",
-                                    value=padrao["No preço"],
-                                    key="chk_nopreco_curva",
-                                )
-                            with col_s3:
-                                flags["Caro"] = st.checkbox(
-                                    "Caro",
-                                    value=padrao["Caro"],
-                                    key="chk_caro_curva",
-                                )
-
-                            sinais_ativos = [
-                                s for s in sinais_disponiveis if flags.get(s, False)
-                            ]
-                            if not sinais_ativos:
-                                st.info(
-                                    "Nenhum sinal selecionado. Marque ao menos uma opção "
-                                    "(Barato, No preço ou Caro)."
-                                )
-                            else:
-                                df_filtrado = df_base[df_base["Sinal"].isin(sinais_ativos)]
-
-                                if df_filtrado.empty:
-                                    st.info(
-                                        "Não há títulos com os sinais selecionados "
-                                        "nas condições atuais de mercado."
-                                    )
-                                else:
-                                    df_show = df_filtrado.copy()
-
-                                    # Taxas em % com 2 casas
-                                    for col in ["taxa_compra", col_taxa_curva]:
-                                        if col in df_show.columns:
-                                            df_show[col] = df_show[col].map(
-                                                lambda x: f"{x:.2f}"
-                                                if pd.notna(x)
-                                                else "-"
-                                            )
-
-                                    # Spread em bps sem casa decimal
-                                    if "spread_bps" in df_show.columns:
-                                        df_show["spread_bps"] = df_show[
-                                            "spread_bps"
-                                        ].map(
-                                            lambda x: f"{x:.0f}"
-                                            if pd.notna(x)
-                                            else "-"
-                                        )
-
-                                    renomear = {
-                                        "nome_titulo": "Título",
-                                        "data_vencimento": "Vencimento",
-                                        "prazo_anos": "Prazo (anos)",
-                                        "taxa_compra": "Tesouro (% a.a.)",
-                                        col_taxa_curva: label_taxa_curva,
-                                        "spread_bps": "Spread x curva (bps)",
-                                    }
-                                    df_show = df_show.rename(columns=renomear)
-
-                                    colunas_ordem = [
-                                        "Título",
-                                        "Vencimento",
-                                        "Prazo (anos)",
-                                        "Tesouro (% a.a.)",
-                                        label_taxa_curva,
-                                        "Spread x curva (bps)",
-                                        "Sinal",
-                                    ]
-                                    colunas_existentes = [
-                                        c for c in colunas_ordem if c in df_show.columns
-                                    ]
-                                    df_show = df_show[colunas_existentes]
-
-                                    tabela_out = df_show.copy()
-                                    if "Título" in tabela_out.columns:
-                                        tabela_out = tabela_out.set_index("Título")
-                                    st.table(tabela_out)
-
-                                    legenda_partes = []
-                                    if data_tesouro_ref is not None:
-                                        try:
-                                            dt_ref = pd.to_datetime(
-                                                data_tesouro_ref
-                                            ).strftime("%d/%m/%Y")
-                                        except Exception:
-                                            dt_ref = str(data_tesouro_ref)
-                                        legenda_partes.append(
-                                            f"Tesouro Direto – dados de {dt_ref}."
-                                        )
-                                    if data_curva_ref is not None:
-                                        try:
-                                            dc_ref = pd.to_datetime(
-                                                data_curva_ref
-                                            ).strftime("%d/%m/%Y")
-                                        except Exception:
-                                            dc_ref = str(data_curva_ref)
-                                        legenda_partes.append(
-                                            f"Curva ANBIMA (ETTJ soberana) – dados de {dc_ref}."
-                                        )
-
-                                    if legenda_partes:
-                                        st.caption("Fontes: " + " ".join(legenda_partes))
-
-                except Exception as e:
-                    st.warning(
-                        f"Não foi possível carregar a comparação Tesouro x Curva ANBIMA: {e}"
-                    )
 
         # -------- Expectativas BR --------
         with subtab_exp_br:
