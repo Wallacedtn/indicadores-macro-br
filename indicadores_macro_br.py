@@ -4526,35 +4526,33 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
         st.info("Ainda não há dados de atividade econômica disponíveis.")
         return
 
-
     # ---------------- TÍTULO + DESCRIÇÃO (fora do card) ----------------
     st.markdown("### Atividade econômica – IBGE")
     st.caption(
         "Indicadores de volume de Varejo (PMC), Serviços (PMS) e Indústria (PIM-PF), "
-        "classificados como indicadores coincidentes do ciclo econômico."
+        "classificados em antecedentes, coincidentes e defasados do ciclo econômico."
     )
 
-    # ---------------- CARD ION (igual espírito dos outros blocos) ----------------
-    # Tudo que é “conteúdo” do bloco (título pequeno + filtro + tabela)
-    # fica dentro desse container, que o theme_ion estiliza como card.
+    # ---------------- CARD ION ----------------
     with st.container(border=True):
 
         # Linha do subtítulo + filtro (2 colunas, estilo Ion)
-        col_label, col_filtro = st.columns([3, 1])
+        col_label, col_filtro = st.columns([3, 2])
 
         with col_label:
             st.markdown("##### Classificação cíclica dos indicadores")
 
         with col_filtro:
+            # Agora tem os três tipos + opção Todos
             filtro_classif = st.radio(
                 "Classificação",
-                ["Coincidente", "Todos"],
-                index=0,  # Coincidente como padrão
+                ["Antecedente", "Coincidente", "Defasado", "Todos"],
+                index=1,  # começa em Coincidente
                 key="filtro_atividade_ibge",
-                horizontal=True,  # fica lado a lado, menos poluição visual
+                horizontal=True,
             )
 
-        # --------- LÓGICA DO FILTRO (igual você já tinha) ---------
+        # --------- LÓGICA DO FILTRO ---------
         df_exibir = df_ativ.copy()
 
         if filtro_classif != "Todos":
@@ -4564,17 +4562,31 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
                 .str.contains(filtro_classif, case=False, na=False)
             ]
 
-        # --------- TABELA NO PADRÃO ION ---------
-        st.table(
-        df_exibir.set_index(["Indicador", "Classificação"])
+        # Se ainda não tiver nenhum antecedente/defasado configurado,
+        # mostra um aviso elegante em vez de tabela vazia.
+        if df_exibir.empty:
+            st.info(
+                f"Ainda não há indicadores classificados como **{filtro_classif}** "
+                "na tabela de atividade. "
+                "Quando você incluir novas séries com essa classificação, "
+                "elas aparecerão aqui automaticamente."
+            )
+        else:
+            st.table(
+                df_exibir.set_index(["Indicador", "Classificação"])
+            )
+
+    # Aviso embaixo, explicando o que falta ligar
+    st.info(
+        "⚙️ Parte avançada: você já tem os coincidentes (PMC, PMS, PIM-PF). "
+        "Para ativar os **antecedentes** (ex.: PMI, confiança FGV) e "
+        "**defasados** (ex.: desemprego, massa salarial), "
+        "basta incluir novas linhas em `get_tabela_atividade()` / "
+        "`montar_tabela_atividade_economica()` com a coluna "
+        "`Classificação` marcada como "
+        "\"🟢 Antecedente\", \"🟡 Coincidente\" ou \"🔴 Defasado\"."
     )
 
-    # ---------------- AVISO EMBAIXO (fora do card, igual outros blocos) ----------------
-    st.info(
-        "⚙️ Em construção (parte avançada): inclusão de indicadores antecedentes "
-        "(PMI, confiança FGV) e defasados (desemprego, massa salarial), "
-        "todos com a mesma lógica de classificação cíclica."
-    )
 
 
 def render_bloco_expectativas_focus(
