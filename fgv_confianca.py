@@ -188,25 +188,27 @@ def _parse_valor_e_delta_from_text(text: str) -> Tuple[Optional[float], Optional
     if m_val:
         valor = _to_float(m_val.group(1))
 
-    # DELTA: aceita "subiu 1 ponto", "subiu 1,0 ponto", "recuou 0,7 ponto",
-    # e também "ficou/permaneceu/manteve-se estável" => 0.0
+    # DELTA: cobre "recuou 0,1", "ao recuar 0,1", "avancou", "ao avancar", etc.
     delta: Optional[float] = None
 
     m_del = re.search(
-        r"(subiu|avancou|aumentou|caiu|recuou|cedeu)\s+(?:em\s+|de\s+)?(\d{1,3}(?:[.,]\d)?)\s+pontos?",
+        r"(?:ao\s+)?(subiu|subir|avancou|avancar|aumentou|aumentar|caiu|cair|recuou|recuar|cedeu|ceder)"
+        r"\s+(?:em\s+|de\s+)?(\d{1,3}(?:[.,]\d)?)\s+pontos?",
         tn
     )
     if m_del:
         v = _to_float(m_del.group(2))
         if v is not None:
             verbo = m_del.group(1)
-            if verbo in ("caiu", "recuou", "cedeu"):
+            if verbo in ("caiu", "cair", "recuou", "recuar", "cedeu", "ceder"):
                 v = -v
             delta = v
 
+    # estabilidade com palavra no meio ("ficou praticamente estável")
     if delta is None:
-        if re.search(r"(ficou|permaneceu|manteve\s*-?se)\s+estavel", tn):
+        if re.search(r"(ficou|permaneceu|manteve\s*-?se)(?:\s+\w+){0,2}\s+estavel", tn):
             delta = 0.0
+
 
     return valor, delta
 

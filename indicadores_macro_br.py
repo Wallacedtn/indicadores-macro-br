@@ -18,6 +18,7 @@ from dados_macro_fiscal_br import carregar_dados_macro_fiscal_br
 from di_futuro_b3 import carregar_historico_di_futuro
 from caged_saldo_brasil import carregar_caged_saldo_csv, atualizar_caged_saldo_brasil_csv
 from fgv_confianca import resumo_fgv_indice
+import re
 
 from risco_brasil_spread_10y import (
     atualizar_spread_10y,
@@ -2588,11 +2589,11 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
 
     def _fmt_pts(x, signed=False):
         if x is None:
-            return "-"
+            return "•"
         try:
             v = float(x)
         except Exception:
-            return "-"
+            return "•"
         s = f"{v:+.1f}" if signed else f"{v:.1f}"
         return f"{s.replace('.', ',')} pts"
 
@@ -2619,7 +2620,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                 "Classificação": "🟢 Antecedente",
                 "Mês ref.": r["referencia"],
                 "Var. mensal": _fmt_pts(r.get("delta_pts"), signed=True),
-                "Acum. no ano": "-",                 # evita aparecer "•"
+                "Acum. no ano": "•",
                 "Acum. 12 meses": _fmt_pts(r["nivel"]),
                 "Fonte": f"FGV / {sigla} (Portal IBRE – FGV)",
             }
@@ -4571,32 +4572,144 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
     with st.container(border=True):
         st.markdown("##### Classificação cíclica dos indicadores")
 
-        df_exibir = df_ativ.copy()
+        # -----------------------------
+        # Helpers locais (não mexe no resto do projeto)
+        # -----------------------------
+        def _fmt_pts(x, signed=False):
+            if x is None:
+                return "•"
+            try:
+                v = float(x)
+            except Exception:
+                return "•"
+            s = f"{v:+.1f}" if signed else f"{v:.1f}"
+            return f"{s.replace('.', ',')} pts"
 
-        # Ordena por classificação (🟢, 🟡, 🔴) e depois por indicador
-        ordem = {"🟢 Antecedente": 0, "🟡 Coincidente": 1, "🔴 Defasado": 2}
-        df_exibir["_ord"] = df_exibir["Classificação"].map(ordem).fillna(9)
-        df_exibir = df_exibir.sort_values(["_ord", "Indicador"]).drop(columns=["_ord"])
+        def _extract_sigla(indicador: str):
+            # pega (ICC), (ICE), etc dentro do texto "Confiança ... (ICC) – nível"
+            m = re.search(r"\((ICC|ICI|ICS|ICOM|ICST|ICE)\)", str(indicador))
+            return m.group(1) if m else None
 
-        # Padroniza vazios (tira bolinhas / None)
-        df_exibir = df_exibir.fillna("-").replace({"•": "-", "·": "-", "◦": "-"})
+        def _fgv_delta_pts(sigla: str, meses_atras: int):
+            """
+            Calcula (pontos do último mês) - (pontos de N meses atrás) usando:
+            data/sondagens_fgv/{sigla_lower}_fgv.csv
+            """
+            try:
+                arq = DATA_DIR / "sondagens_fgv" / f"{sigla.lower()}_fgv.csv"
+                if not arq.exists():
+                    return None
 
-        # "Acum. 12 meses" (IBGE) e "Nível" (FGV) caem na mesma coluna.
-        # Renomeia para ficar didático.
-        if "Acum. 12 meses" in df_exibir.columns:
-            df_exibir = df_exibir.rename(columns={"Acum. 12 meses": "Nível / 12m"})
+                df = pd.read_csv(arq)
+                if df is None or df.empty or "mes_ref" not in df.columns or "pontos" not in df.columns:
+                    return None
 
-        # Não exibe índice numérico na tabela
-        df_exibir.index = [""] * len(df_exibir)
+                df["mes_ref"] = pd.to_datetime(df["mes_ref"], errors="coerce")
+                df = df.dropna(subset=["mes_ref"]).sort_values("mes_ref")
+                if df.empty:
+                    return None
 
-        # Usa st.table para pegar o CSS Íon (st.dataframe tende a ficar "preto")
-        st.table(df_exibir)
+                df["per"] = df["mes_ref"].dt.to_period("M")
+                per_last = df["per"].iloc[-1]
+                per_target = per_last - meses_atras
 
-    st.info(
-        "⚙️ Dica: para adicionar novos indicadores, inclua novas linhas em "
-        "`montar_tabela_atividade_economica()` com a coluna `Classificação` "
-        "como \"🟢 Antecedente\", \"🟡 Coincidente\" ou \"🔴 Defasado\"."
-    )
+                row_last = df.iloc[-1]
+                row_target = df[df["per"] == per_target]
+                if row_target.empty:
+                    return None
+
+                v_last = float(row_last["pontos"])
+                v_prev = float(row_target.iloc[-1]["pontos"])
+                return v_last - v_prev
+            except Exception:
+                return None
+
+        # -----------------------------
+        # Base
+        # -----------------------------
+        df_base = df_ativ.copy()
+
+        # Garante colunas esperadas (evita quebrar se alguma vier faltando)
+        for col in ["Indicador", "Classificação", "Mês ref.", "Var. mensal", "Acum. no ano", "Acum. 12 meses", "Fonte"]:
+            if col not in df_base.columns:
+                df_base[col] = "•"
+
+        # Separa por tipo (sem radios / sem filtros)
+        df_ant = df_base[df_base["Classificação"].astype(str).str.contains("Antecedente", na=False)].copy()
+        df_coi = df_base[df_base["Classificação"].astype(str).str.contains("Coincidente", na=False)].copy()
+        df_def = df_base[df_base["Classificação"].astype(str).str.contains("Defasado", na=False)].copy()
+
+        # -----------------------------
+        # 1) ANTECEDENTES (FGV) — colunas “de gestor”
+        #    - Nível
+        #    - Δ m/m (pts)
+        #    - Δ 3m (pts)
+        #    - Δ 12m (pts)
+        # -----------------------------
+        if not df_ant.empty:
+            df_ant["sigla"] = df_ant["Indicador"].apply(_extract_sigla)
+
+            df_ant["Δ 3m"] = df_ant["sigla"].apply(lambda s: _fmt_pts(_fgv_delta_pts(s, 3), signed=True) if s else "•")
+            df_ant["Δ 12m"] = df_ant["sigla"].apply(lambda s: _fmt_pts(_fgv_delta_pts(s, 12), signed=True) if s else "•")
+
+            # Seu dataframe “cru” usa "Acum. 12 meses" para guardar o nível (FGV)
+            df_ant_view = df_ant.rename(
+                columns={
+                    "Var. mensal": "Δ m/m",
+                    "Acum. 12 meses": "Nível",
+                    "Acum. no ano": "No ano (YTD)",
+                }
+            )
+
+            # Mantém só o que faz sentido para antecedente
+            df_ant_view = df_ant_view[["Indicador", "Mês ref.", "Δ m/m", "Δ 3m", "Δ 12m", "Nível", "Fonte"]].copy()
+
+            # Ordenação simples e estável
+            df_ant_view = df_ant_view.sort_values(["Indicador"])
+
+            st.markdown("**Antecedentes (Confiança – FGV)**")
+            df_ant_view.index = [""] * len(df_ant_view)
+            st.table(df_ant_view)
+
+        # -----------------------------
+        # 2) COINCIDENTES (IBGE) — padrão IBGE
+        #    - Δ m/m (%)
+        #    - No ano (YTD)
+        #    - 12m (%)
+        # -----------------------------
+        if not df_coi.empty:
+            df_coi_view = df_coi.rename(
+                columns={
+                    "Var. mensal": "Δ m/m",
+                    "Acum. 12 meses": "12m",
+                    "Acum. no ano": "No ano (YTD)",
+                }
+            )
+            df_coi_view = df_coi_view[["Indicador", "Mês ref.", "Δ m/m", "No ano (YTD)", "12m", "Fonte"]].copy()
+            df_coi_view = df_coi_view.sort_values(["Indicador"])
+
+            st.markdown("**Coincidentes (Atividade – IBGE)**")
+            df_coi_view.index = [""] * len(df_coi_view)
+            st.table(df_coi_view)
+
+        # -----------------------------
+        # 3) DEFASADOS (se você adicionar depois)
+        # -----------------------------
+        if not df_def.empty:
+            df_def_view = df_def.rename(
+                columns={
+                    "Var. mensal": "Δ m/m",
+                    "Acum. 12 meses": "12m",
+                    "Acum. no ano": "No ano (YTD)",
+                }
+            )
+            df_def_view = df_def_view[["Indicador", "Mês ref.", "Δ m/m", "No ano (YTD)", "12m", "Fonte"]].copy()
+            df_def_view = df_def_view.sort_values(["Indicador"])
+
+            st.markdown("**Defasados**")
+            df_def_view.index = [""] * len(df_def_view)
+            st.table(df_def_view)
+
 
 
 
