@@ -196,17 +196,26 @@ def _carregar_datas_copom_ics() -> List[date]:
         dtstart = comp.get("DTSTART").dt
         dtend = comp.get("DTEND").dt
 
-        # usamos o ÚLTIMO dia da reunião como "data da decisão"
-        if isinstance(dtend, datetime):
-            decisao = dtend.date()
-        elif isinstance(dtend, date):
-            decisao = dtend
-        else:
-            # fallback: dtstart + 1 dia
-            if isinstance(dtstart, datetime):
-                decisao = (dtstart + timedelta(days=1)).date()
+        # decisão = 2º dia da reunião (Copom é sempre 2 dias)
+        # O .ics pode vir com DTEND inclusivo (2º dia) ou exclusivo (dia seguinte).
+        start = dtstart.date() if isinstance(dtstart, datetime) else dtstart
+        end = dtend.date() if isinstance(dtend, datetime) else dtend
+
+        if not isinstance(start, date):
+            continue
+
+        if isinstance(end, date):
+            diff = (end - start).days
+            # se DTEND for exclusivo, diff tende a 2 (ex.: 10→12)
+            if diff >= 2:
+                decisao = start + timedelta(days=1)
+            elif diff >= 1:
+                decisao = end
             else:
-                decisao = dtstart + timedelta(days=1)
+                decisao = start
+        else:
+            decisao = start + timedelta(days=1)
+
 
         if isinstance(decisao, date):
             datas.append(decisao)
@@ -262,62 +271,6 @@ def obter_ultima_e_proxima_reuniao_copom(
 
     return ultima, proxima
 
-# ---------------- COPOM – CALENDÁRIO BÁSICO ----------------
-# Datas de DIVULGAÇÃO das decisões (2º dia da reunião)
-COPOM_DATAS_DECISAO = [
-    # 2024
-    date(2024, 1, 31),
-    date(2024, 3, 20),
-    date(2024, 5, 8),
-    date(2024, 6, 19),
-    date(2024, 7, 31),
-    date(2024, 9, 18),
-    date(2024, 11, 6),
-    date(2024, 12, 18),
-    # 2025
-    date(2025, 1, 29),
-    date(2025, 3, 19),
-    date(2025, 5, 7),
-    date(2025, 6, 18),
-    date(2025, 7, 30),
-    date(2025, 9, 17),
-    date(2025, 11, 5),
-    date(2025, 12, 10),
-    # 2026
-    date(2026, 1, 28),
-    date(2026, 3, 18),
-    date(2026, 4, 29),
-    date(2026, 6, 17),
-    date(2026, 8, 5),
-    date(2026, 9, 16),
-    date(2026, 11, 4),
-    date(2026, 12, 9),
-]
-
-
-def obter_ultima_e_proxima_reuniao_copom(
-    ref: date,
-) -> tuple[Optional[date], Optional[date]]:
-    """
-    Dada uma data de referência, devolve:
-      - última reunião do Copom (<= ref)
-      - próxima reunião do Copom (> ref)
-    """
-    if not COPOM_DATAS_DECISAO:
-        return None, None
-
-    datas = sorted(COPOM_DATAS_DECISAO)
-    ultima: Optional[date] = None
-    proxima: Optional[date] = None
-
-    for d in datas:
-        if d <= ref:
-            ultima = d
-        elif d > ref and proxima is None:
-            proxima = d
-            break
-
-    return ultima, proxima
 
 
 @lru_cache(maxsize=32)

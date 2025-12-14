@@ -17,6 +17,7 @@ from pathlib import Path
 from dados_macro_fiscal_br import carregar_dados_macro_fiscal_br
 from di_futuro_b3 import carregar_historico_di_futuro
 from caged_saldo_brasil import carregar_caged_saldo_csv, atualizar_caged_saldo_brasil_csv
+from fgv_confianca import resumo_fgv_indice
 
 from risco_brasil_spread_10y import (
     atualizar_spread_10y,
@@ -2585,6 +2586,45 @@ def montar_tabela_di_futuro() -> pd.DataFrame:
 def montar_tabela_atividade_economica() -> pd.DataFrame:
     linhas: List[Dict[str, str]] = []
 
+    def _fmt_pts(x, signed=False):
+        if x is None:
+            return "-"
+        try:
+            v = float(x)
+        except Exception:
+            return "-"
+        s = f"{v:+.1f}" if signed else f"{v:.1f}"
+        return f"{s.replace('.', ',')} pts"
+
+    # FGV IBRE – Antecedentes (índices de confiança)
+    fgv_map = [
+        ("ICC",  "Confiança do Consumidor (ICC)"),
+        ("ICI",  "Confiança da Indústria (ICI)"),
+        ("ICS",  "Confiança de Serviços (ICS)"),
+        ("ICOM", "Confiança do Comércio (ICOM)"),
+        ("ICST", "Confiança da Construção (ICST)"),
+        ("ICE",  "Confiança Empresarial (ICE)"),
+    ]
+
+    for sigla, nome in fgv_map:
+        r = resumo_fgv_indice(sigla)
+
+        # se não tiver dado, não adiciona linha
+        if r.get("referencia", "-") == "-" or r.get("nivel", None) is None:
+            continue
+
+        linhas.append(
+            {
+                "Indicador": f"{nome} – nível",
+                "Classificação": "🟢 Antecedente",
+                "Mês ref.": r["referencia"],
+                "Var. mensal": _fmt_pts(r.get("delta_pts"), signed=True),
+                "Acum. no ano": "-",                 # evita aparecer "•"
+                "Acum. 12 meses": _fmt_pts(r["nivel"]),
+                "Fonte": f"FGV / {sigla} (Portal IBRE – FGV)",
+            }
+        )
+
     # Varejo (PMC) – COINCIDENTE
     try:
         r_pmc = resumo_pmc_oficial()
@@ -4521,70 +4561,38 @@ def render_bloco4_mercado_trabalho():
 
 
 def render_bloco5_atividade(df_ativ: pd.DataFrame):
-    # Se vier vazio, mostra aviso amigável
     if df_ativ is None or df_ativ.empty:
         st.info("Ainda não há dados de atividade econômica disponíveis.")
         return
 
-    # ---------------- TÍTULO + DESCRIÇÃO (fora do card) ----------------
-    st.markdown("### Atividade econômica – IBGE")
+    st.markdown("### Atividade econômica – Indicadores (IBGE/FGV)")
     st.caption(
-        "Indicadores de volume de Varejo (PMC), Serviços (PMS) e Indústria (PIM-PF), "
-        "classificados em antecedentes, coincidentes e defasados do ciclo econômico."
+        "Indicadores classificados em antecedentes, coincidentes e defasados do ciclo econômico."
     )
 
-    # ---------------- CARD ION ----------------
     with st.container(border=True):
+        st.markdown("##### Classificação cíclica dos indicadores")
 
-        # Linha do subtítulo + filtro (2 colunas, estilo Ion)
-        col_label, col_filtro = st.columns([3, 2])
-
-        with col_label:
-            st.markdown("##### Classificação cíclica dos indicadores")
-
-        with col_filtro:
-            # Agora tem os três tipos + opção Todos
-            filtro_classif = st.radio(
-                "Classificação",
-                ["Antecedente", "Coincidente", "Defasado", "Todos"],
-                index=1,  # começa em Coincidente
-                key="filtro_atividade_ibge",
-                horizontal=True,
-            )
-
-        # --------- LÓGICA DO FILTRO ---------
         df_exibir = df_ativ.copy()
 
-        if filtro_classif != "Todos":
-            df_exibir = df_exibir[
-                df_exibir["Classificação"]
-                .astype(str)
-                .str.contains(filtro_classif, case=False, na=False)
-            ]
+        # Ordena por classificação (🟢, 🟡, 🔴) e depois por indicador
+        ordem = {"🟢 Antecedente": 0, "🟡 Coincidente": 1, "🔴 Defasado": 2}
+        df_exibir["_ord"] = df_exibir["Classificação"].map(ordem).fillna(9)
+        df_exibir = df_exibir.sort_values(["_ord", "Indicador"]).drop(columns=["_ord"])
 
-        # Se ainda não tiver nenhum antecedente/defasado configurado,
-        # mostra um aviso elegante em vez de tabela vazia.
-        if df_exibir.empty:
-            st.info(
-                f"Ainda não há indicadores classificados como **{filtro_classif}** "
-                "na tabela de atividade. "
-                "Quando você incluir novas séries com essa classificação, "
-                "elas aparecerão aqui automaticamente."
-            )
-        else:
-            st.table(
-                df_exibir.set_index(["Indicador", "Classificação"])
-            )
+        # Padroniza vazios (tira bolinhas / None)
+        df_exibir = df_exibir.fillna("-").replace({"•": "-", "·": "-", "◦": "-"})
 
-    # Aviso embaixo, explicando o que falta ligar
+        # Tabela interativa (ordenação sem rerun)
+        try:
+            st.dataframe(df_exibir, use_container_width=True, hide_index=True)
+        except TypeError:
+            st.dataframe(df_exibir, use_container_width=True)
+
     st.info(
-        "⚙️ Parte avançada: você já tem os coincidentes (PMC, PMS, PIM-PF). "
-        "Para ativar os **antecedentes** (ex.: PMI, confiança FGV) e "
-        "**defasados** (ex.: desemprego, massa salarial), "
-        "basta incluir novas linhas em `get_tabela_atividade()` / "
-        "`montar_tabela_atividade_economica()` com a coluna "
-        "`Classificação` marcada como "
-        "\"🟢 Antecedente\", \"🟡 Coincidente\" ou \"🔴 Defasado\"."
+        "⚙️ Dica: para adicionar novos indicadores, inclua novas linhas em "
+        "`montar_tabela_atividade_economica()` com a coluna `Classificação` "
+        "como \"🟢 Antecedente\", \"🟡 Coincidente\" ou \"🔴 Defasado\"."
     )
 
 

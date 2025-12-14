@@ -23,6 +23,7 @@ from risco_brasil_spread_10y import atualizar_spread_10y
 from dados_macro_fiscal_br import atualizar_divida_bruta_csv, atualizar_resultado_primario_csv
 from ipca_ibge import atualizar_ipca_mensal_csv
 from caged_saldo_brasil import atualizar_caged_saldo_brasil_csv
+from fgv_confianca import atualizar_fgv_indice
 
 
 
@@ -128,6 +129,16 @@ def main() -> None:
         print(f"    ✔ IPCA mensal ok ({len(df_ipca)} linhas).")
     except Exception as e:
         print(f"    ❌ Erro ao atualizar IPCA mensal: {e}")
+    
+    # 12) FGV – Índices de Confiança (Antecedentes)
+    try:
+        print("[12/12] Atualizando índices de confiança (ICC/ICI/ICS/ICOM/ICST/ICE)...")
+        for s in ["ICC", "ICI", "ICS", "ICOM", "ICST", "ICE"]:
+            atualizar_fgv_indice(s)
+        print("    ✔ FGV ok.")
+    except Exception as e:
+        print(f"    ❌ Erro FGV confiança: {e}")
+
 
 
 
