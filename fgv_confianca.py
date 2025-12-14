@@ -10,6 +10,7 @@ import re
 import unicodedata
 import subprocess
 import shutil
+import time as _time
 
 import pandas as pd
 import requests
@@ -307,7 +308,7 @@ def _extract_release_urls_from_taxonomy(html: str, sigla: str, slug_prefix: str,
     return out[:max_links]
 
 
-def atualizar_fgv_indice(sigla: str) -> pd.DataFrame:
+def atualizar_fgv_indice(sigla: str, max_meses: int = 240, max_pages: int = 30, sleep_s: float = 0.2) -> pd.DataFrame:
     sigla = sigla.upper()
     if sigla not in FGV_INDICES:
         raise ValueError(f"Sigla inválida: {sigla}. Use uma de: {list(FGV_INDICES.keys())}")
@@ -323,15 +324,96 @@ def atualizar_fgv_indice(sigla: str) -> pd.DataFrame:
     else:
         df_old = pd.DataFrame(columns=["mes_ref","data_divulgacao","pontos","delta_pts","url","titulo"])
 
-    html_term = _fetch_text(term_url)
-    urls = _extract_release_urls_from_taxonomy(html_term, sigla=sigla, slug_prefix=slug_prefix, max_links=20)
-    if not urls:
+    # --- coleta URLs de vários meses (varre páginas do taxonomy) ---
+    all_urls: List[str] = []
+    seen_urls = set()
+
+    for page in range(max_pages):
+        term_page = term_url if page == 0 else f"{term_url}?page={page}"
+        try:
+            html_term = _fetch_text(term_page)
+        except Exception:
+            break
+
+        urls_page = _extract_release_urls_from_taxonomy(
+            html_term, sigla=sigla, slug_prefix=slug_prefix, max_links=500
+        )
+
+        novos = 0
+        for u in urls_page:
+            if u not in seen_urls:
+                seen_urls.add(u)
+                all_urls.append(u)
+                novos += 1
+
+        # se uma página não trouxe nada novo, provavelmente acabou a paginação útil
+        if novos == 0:
+            break
+
+        if sleep_s:
+            _time.sleep(sleep_s)
+
+    if not all_urls:
         print(f"[FGV/{sigla}] Nenhum /press-releases encontrado. Mantendo CSV anterior.")
         return df_old
 
-    # escolhe o melhor candidato (primeiro já é o mensal pela prioridade)
-    url_release = urls[0]
-    html_rel = _fetch_text(url_release)
+    # --- processa vários releases e monta linhas ---
+    rows = []
+    for url_release in all_urls[:max_meses]:
+        try:
+            html_rel = _fetch_text(url_release)
+            titulo = _parse_title(html_rel)
+            data_div = _parse_date_divulgacao(html_rel)
+            mes_ref = _parse_mes_ref_from_title_or_slug(sigla, titulo, url_release)
+
+            # fallback mês ref: usa mês da data de divulgação
+            if (not mes_ref) and isinstance(data_div, date):
+                mes_ref = f"{data_div.year:04d}-{data_div.month:02d}"
+
+            texto_rel = _html_to_text(html_rel)
+            nivel, delta = _parse_valor_e_delta_from_text(texto_rel)
+
+            # fallback PDF
+            if nivel is None or delta is None:
+                pdf_url = _extract_pdf_url_from_release_html(html_rel)
+                if pdf_url:
+                    try:
+                        pdf_bytes = _fetch_bytes(pdf_url)
+                        n_pdf, d_pdf = _parse_valor_e_delta_from_pdf(pdf_bytes)
+                        if nivel is None and n_pdf is not None:
+                            nivel = n_pdf
+                        if delta is None and d_pdf is not None:
+                            delta = d_pdf
+                    except Exception as e:
+                        print(f"[FGV/{sigla}] Falha PDF ({pdf_url}): {e}")
+
+            # se não conseguiu nível ou mes_ref válido, pula
+            if (nivel is None) or (not mes_ref) or (not re.match(r"^\d{4}-\d{2}$", str(mes_ref))):
+                continue
+
+            rows.append(
+                {
+                    "mes_ref": mes_ref,
+                    "data_divulgacao": data_div.isoformat() if isinstance(data_div, date) else "",
+                    "pontos": nivel,
+                    "delta_pts": delta if delta is not None else "",
+                    "url": url_release,
+                    "titulo": titulo,
+                }
+            )
+
+            if sleep_s:
+                _time.sleep(sleep_s)
+
+        except Exception:
+            continue
+
+    if not rows:
+        print(f"[FGV/{sigla}] Não consegui extrair nenhum mês válido. Mantendo CSV anterior.")
+        return df_old
+
+    df_new = pd.DataFrame(rows)
+    df = df_new if df_old.empty else pd.concat([df_old, df_new], ignore_index=True)
 
     titulo = _parse_title(html_rel)
     data_div = _parse_date_divulgacao(html_rel)
