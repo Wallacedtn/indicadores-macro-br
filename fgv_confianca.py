@@ -176,28 +176,76 @@ def _html_to_text(html: str) -> str:
 def _parse_valor_e_delta_from_text(text: str) -> Tuple[Optional[float], Optional[float]]:
     tn = _strip_accents(text.lower()).replace("ç", "c")
 
-    valor = None
-    m_val = re.search(r"para\s+(\d{1,3},\d)\s+pontos", tn)
-    if m_val:
+    def _to_float(s: str) -> Optional[float]:
         try:
-            valor = float(m_val.group(1).replace(",", "."))
+            return float(s.replace(",", "."))
         except Exception:
-            valor = None
+            return None
 
-    delta = None
-    m_del = re.search(r"(subiu|avancou|aumentou|caiu|recuou|cedeu)\s+(\d{1,3},\d)\s+ponto", tn)
+    # NIVEL: aceita "para 89,5 pontos" e "em 89,5 pontos" (com ou sem decimal)
+    valor: Optional[float] = None
+    m_val = re.search(r"(?:para|em)\s+(\d{1,3}(?:[.,]\d)?)\s+pontos?", tn)
+    if m_val:
+        valor = _to_float(m_val.group(1))
+
+    # DELTA: aceita "subiu 1 ponto", "subiu 1,0 ponto", "recuou 0,7 ponto",
+    # e também "ficou/permaneceu/manteve-se estável" => 0.0
+    delta: Optional[float] = None
+
+    m_del = re.search(
+        r"(subiu|avancou|aumentou|caiu|recuou|cedeu)\s+(?:em\s+|de\s+)?(\d{1,3}(?:[.,]\d)?)\s+pontos?",
+        tn
+    )
     if m_del:
-        try:
-            v = float(m_del.group(2).replace(",", "."))
+        v = _to_float(m_del.group(2))
+        if v is not None:
             verbo = m_del.group(1)
             if verbo in ("caiu", "recuou", "cedeu"):
                 v = -v
             delta = v
-        except Exception:
-            delta = None
+
+    if delta is None:
+        if re.search(r"(ficou|permaneceu|manteve\s*-?se)\s+estavel", tn):
+            delta = 0.0
 
     return valor, delta
 
+
+def _calc_delta_from_history(df_old: pd.DataFrame, mes_ref: str, nivel_atual: float) -> Optional[float]:
+    """Calcula delta (pontos) pelo histórico salvo, quando o release não informa a variação.
+
+    Usa o último 'pontos' disponível do mês imediatamente anterior no CSV (ordenado por mes_ref).
+    Retorna None se não houver histórico suficiente.
+    """
+    if df_old is None or df_old.empty:
+        return None
+
+    dfh = df_old.copy()
+    if "mes_ref" not in dfh.columns or "pontos" not in dfh.columns:
+        return None
+
+    dfh["mes_ref"] = dfh["mes_ref"].astype(str).str.strip()
+    dfh = dfh[dfh["mes_ref"].str.match(r"^\d{4}-\d{2}$", na=False)].copy()
+    if dfh.empty:
+        return None
+
+    dfh["pontos"] = pd.to_numeric(dfh["pontos"], errors="coerce")
+    dfh = dfh.dropna(subset=["pontos"]).copy()
+    if dfh.empty:
+        return None
+
+    # remove o próprio mês (se já existir no histórico)
+    dfh = dfh[dfh["mes_ref"] != str(mes_ref)].copy()
+    if dfh.empty:
+        return None
+
+    # pega o último mês disponível no histórico
+    dfh = dfh.sort_values("mes_ref")
+    prev_pontos = dfh.iloc[-1]["pontos"]
+    try:
+        return float(nivel_atual) - float(prev_pontos)
+    except Exception:
+        return None
 
 def _extract_pdf_url_from_release_html(html: str) -> Optional[str]:
     matches = re.findall(r'href="([^"]+\.pdf[^"]*)"', html, flags=re.IGNORECASE)
@@ -307,6 +355,19 @@ def atualizar_fgv_indice(sigla: str) -> pd.DataFrame:
                     delta = d_pdf
             except Exception as e:
                 print(f"[FGV/{sigla}] Falha PDF ({pdf_url}): {e}")
+
+
+    # fallback DELTA via texto/histórico:
+    # - se o release indicar "estável", delta=0
+    # - senão, tenta calcular pela diferença com o último mês disponível no CSV
+    if delta is None and (nivel is not None) and mes_ref:
+        tn_rel = _strip_accents(texto_rel.lower())
+        if re.search(r"(ficou|permaneceu|manteve\-se|se\s+manteve)\s+estavel", tn_rel):
+            delta = 0.0
+        else:
+            delta_hist = _calc_delta_from_history(df_old, mes_ref, float(nivel))
+            if delta_hist is not None:
+                delta = delta_hist
 
     # FAIL-SAFE: se não conseguiu nível ou mes_ref válido, não grava
     if (nivel is None) or (not mes_ref) or (not re.match(r"^\d{4}-\d{2}$", str(mes_ref))):

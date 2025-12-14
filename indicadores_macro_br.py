@@ -4566,9 +4566,7 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
         return
 
     st.markdown("### Atividade econômica – Indicadores (IBGE/FGV)")
-    st.caption(
-        "Indicadores classificados em antecedentes, coincidentes e defasados do ciclo econômico."
-    )
+    st.caption("Indicadores classificados em antecedentes, coincidentes e defasados do ciclo econômico.")
 
     with st.container(border=True):
         st.markdown("##### Classificação cíclica dos indicadores")
@@ -4583,11 +4581,16 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
         # Padroniza vazios (tira bolinhas / None)
         df_exibir = df_exibir.fillna("-").replace({"•": "-", "·": "-", "◦": "-"})
 
-        # Tabela interativa (ordenação sem rerun)
-        try:
-            st.dataframe(df_exibir, use_container_width=True, hide_index=True)
-        except TypeError:
-            st.dataframe(df_exibir, use_container_width=True)
+        # "Acum. 12 meses" (IBGE) e "Nível" (FGV) caem na mesma coluna.
+        # Renomeia para ficar didático.
+        if "Acum. 12 meses" in df_exibir.columns:
+            df_exibir = df_exibir.rename(columns={"Acum. 12 meses": "Nível / 12m"})
+
+        # Não exibe índice numérico na tabela
+        df_exibir.index = [""] * len(df_exibir)
+
+        # Usa st.table para pegar o CSS Íon (st.dataframe tende a ficar "preto")
+        st.table(df_exibir)
 
     st.info(
         "⚙️ Dica: para adicionar novos indicadores, inclua novas linhas em "
