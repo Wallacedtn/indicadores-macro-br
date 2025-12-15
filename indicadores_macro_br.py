@@ -5199,13 +5199,22 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
                 df_ant = df_ant.drop(columns=["Nível"])
 
             # Seu dataframe “cru” usa "Acum. 12 meses" para guardar o nível (FGV)
-            df_ant_view = df_ant.rename(
+            df_ant_view = df_ant.copy()
+
+            # 1) Renomeia só o que não conflita
+            df_ant_view = df_ant_view.rename(
                 columns={
                     "Var. mensal": "Δ m/m",
-                    "Acum. 12 meses": "Nível",
                     "Acum. no ano": "No ano (YTD)",
                 }
             )
+
+            # 2) Garante que "Nível" vai existir UMA vez só
+            if "Nível" in df_ant_view.columns:
+                df_ant_view = df_ant_view.drop(columns=["Nível"])
+
+            df_ant_view["Nível"] = df_ant_view["Acum. 12 meses"]
+
 
             # tooltip no nome do indicador (usa sigla da própria linha)
             df_ant_view["Indicador"] = df_ant_view.apply(
@@ -5243,8 +5252,8 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
             df_coi_view = df_coi_view.sort_values(["Indicador"])
 
             st.markdown("**Coincidentes (Atividade – IBGE)**")
-            df_coi_view.index = [""] * len(df_coi_view)
-            st.table(df_coi_view)
+            _render_table_html(df_coi_view)
+
 
         # -----------------------------
         # 3) DEFASADOS (se você adicionar depois)
