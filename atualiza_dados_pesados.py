@@ -11,6 +11,7 @@ O Streamlit depois só lê os CSVs prontos.
 """
 
 from datetime import datetime
+from pathlib import Path
 
 from curvas_anbima import atualizar_todas_as_curvas
 from di_futuro_b3 import atualizar_historico_di_futuro
@@ -23,7 +24,8 @@ from risco_brasil_spread_10y import atualizar_spread_10y
 from dados_macro_fiscal_br import atualizar_divida_bruta_csv, atualizar_resultado_primario_csv
 from ipca_ibge import atualizar_ipca_mensal_csv
 from caged_saldo_brasil import atualizar_caged_saldo_brasil_csv
-from fgv_confianca import atualizar_fgv_indice
+from fgv_confianca import atualizar_fgv_indice, rebuild_sondagens_fgv_consolidado, importar_sondagens_fgv_csv_wide
+from ibcbr_bcb import atualizar_ibcbr_csv
 
 
 
@@ -133,14 +135,28 @@ def main() -> None:
     # 12) FGV – Índices de Confiança (Antecedentes)
     try:
         print("[12/12] Atualizando índices de confiança (ICC/ICI/ICS/ICOM/ICST/ICE)...")
-        for s in ["ICC", "ICI", "ICS", "ICOM", "ICST", "ICE"]:
-            atualizar_fgv_indice(s)
+
+        # Preferência: CSV 'wide' baixado manualmente do portal da FGV
+        raw_wide = Path(__file__).resolve().parent / "data" / "sondagens_fgv" / "indicadoresatualizado.csv"
+        if raw_wide.exists() and raw_wide.stat().st_size > 0:
+            importar_sondagens_fgv_csv_wide(raw_wide, salvar_individual=False)
+        else:
+            # Fallback: scraping dos releases (gera os CSVs individuais + consolidado)
+            for s in ["ICC", "ICI", "ICS", "ICOM", "ICST", "ICE"]:
+                atualizar_fgv_indice(s, update_consolidado=False)
+            rebuild_sondagens_fgv_consolidado()
+
         print("    ✔ FGV ok.")
     except Exception as e:
         print(f"    ❌ Erro FGV confiança: {e}")
 
-
-
+    # 13) IBC-Br (BCB/SGS) – atividade (coincidente)
+    try:
+        print("[13/13] Atualizando IBC-Br (BCB/SGS)...")
+        df_ibc = atualizar_ibcbr_csv()  # deve gerar data/atividade_real/ibcbr.csv
+        print(f"    ✔ IBC-Br ok ({len(df_ibc)} linhas).")
+    except Exception as e:
+        print(f"    ❌ Erro ao atualizar IBC-Br: {e}")
 
 
     print("=" * 80)
