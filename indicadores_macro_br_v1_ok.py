@@ -17,6 +17,11 @@ from pathlib import Path
 from dados_macro_fiscal_br import carregar_dados_macro_fiscal_br
 from di_futuro_b3 import carregar_historico_di_futuro
 from caged_saldo_brasil import carregar_caged_saldo_csv, atualizar_caged_saldo_brasil_csv
+from fgv_confianca import resumo_fgv_indice
+import re
+import html
+import html as _html
+
 
 from risco_brasil_spread_10y import (
     atualizar_spread_10y,
@@ -199,6 +204,9 @@ BALANCA_COMERCIAL_CSV = DATA_SETOR_EXTERNO_DIR / "balanca_comercial_mensal_usd.c
 DATA_PRECOS_DIR = DATA_DIR / "precos"
 IPCA_MENSAL_CSV = DATA_PRECOS_DIR / "ipca_mensal_ibge.csv"
 
+DATA_ATIVIDADE_DIR = DATA_DIR / "atividade"
+NUCI_CSV = DATA_ATIVIDADE_DIR / "nuci_capacidade.csv"
+IBC_BR_CSV = DATA_ATIVIDADE_DIR / "ibcbr.csv"
 
 # =============================================================================
 # FUNÇÕES AUXILIARES DE DATA
@@ -266,6 +274,68 @@ def _icon_mes_ref(mes_ref: Optional[str]) -> str:
         <span>{mes_ref}</span>
     </div>
     """
+
+def _parse_mes_pt_abrev(s: str) -> pd.Timestamp:
+    """
+    Converte 'jan/2011' -> 2011-01-01
+    """
+    s = str(s).strip().lower()
+    # aceita 'jan/2011' ou 'jan-2011'
+    s = s.replace("-", "/")
+    mm = {"jan":1,"fev":2,"mar":3,"abr":4,"mai":5,"jun":6,"jul":7,"ago":8,"set":9,"out":10,"nov":11,"dez":12}
+    try:
+        m = mm.get(s[:3])
+        y = int(s[-4:])
+        if not m:
+            return pd.NaT
+        return pd.Timestamp(year=y, month=m, day=1)
+    except Exception:
+        return pd.NaT
+
+
+def carregar_nuci_csv() -> pd.DataFrame:
+    """
+    Espera um CSV com colunas: periodo ; valor
+    Ex.: jan/2011 ; 84,6
+    """
+    if not NUCI_CSV.exists() or NUCI_CSV.stat().st_size == 0:
+        return pd.DataFrame(columns=["data", "valor"])
+
+    df = pd.read_csv(NUCI_CSV, sep=";", encoding="latin1")
+    # normaliza nomes
+    cols = {c.strip().lower(): c for c in df.columns}
+    col_periodo = cols.get("periodo") or cols.get("mês") or cols.get("mes") or list(df.columns)[0]
+    col_valor = cols.get("valor") or list(df.columns)[1]
+
+    df = df[[col_periodo, col_valor]].copy()
+    df.columns = ["periodo", "valor"]
+
+    df["data"] = df["periodo"].apply(_parse_mes_pt_abrev)
+    df["valor"] = pd.to_numeric(df["valor"].astype(str).str.replace(",", "."), errors="coerce")
+    df = df.dropna(subset=["data", "valor"]).sort_values("data").reset_index(drop=True)
+    return df[["data", "valor"]]
+
+
+def resumo_nuci() -> dict:
+    """
+    Retorna último NUCI (%), e delta m/m em p.p.
+    """
+    df = carregar_nuci_csv()
+    if df.empty or len(df) < 2:
+        return {"referencia": None, "nivel": None, "delta_pp": None}
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    nivel = float(last["valor"])
+    delta_pp = float(last["valor"]) - float(prev["valor"])
+
+    return {
+        "referencia": _formata_mes(pd.to_datetime(last["data"])),
+        "nivel": nivel,
+        "delta_pp": delta_pp,
+    }
+
 
 
 # =============================================================================
@@ -2585,6 +2655,45 @@ def montar_tabela_di_futuro() -> pd.DataFrame:
 def montar_tabela_atividade_economica() -> pd.DataFrame:
     linhas: List[Dict[str, str]] = []
 
+    def _fmt_pts(x, signed=False):
+        if x is None:
+            return "•"
+        try:
+            v = float(x)
+        except Exception:
+            return "•"
+        s = f"{v:+.1f}" if signed else f"{v:.1f}"
+        return f"{s.replace('.', ',')} pts"
+
+    # FGV IBRE – Antecedentes (índices de confiança)
+    fgv_map = [
+        ("ICC",  "Confiança do Consumidor (ICC)"),
+        ("ICI",  "Confiança da Indústria (ICI)"),
+        ("ICS",  "Confiança de Serviços (ICS)"),
+        ("ICOM", "Confiança do Comércio (ICOM)"),
+        ("ICST", "Confiança da Construção (ICST)"),
+        ("ICE",  "Confiança Empresarial (ICE)"),
+    ]
+
+    for sigla, nome in fgv_map:
+        r = resumo_fgv_indice(sigla)
+
+        # se não tiver dado, não adiciona linha
+        if r.get("referencia", "-") == "-" or r.get("nivel", None) is None:
+            continue
+
+        linhas.append(
+            {
+                "Indicador": f"{nome} – nível",
+                "Classificação": "🟢 Antecedente",
+                "Mês ref.": r["referencia"],
+                "Var. mensal": _fmt_pts(r.get("delta_pts"), signed=True),
+                "Acum. no ano": "•",
+                "Acum. 12 meses": _fmt_pts(r["nivel"]),
+                "Fonte": f"FGV / {sigla} (Portal IBRE – FGV)",
+            }
+        )
+
     # Varejo (PMC) – COINCIDENTE
     try:
         r_pmc = resumo_pmc_oficial()
@@ -2741,7 +2850,97 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
             }
         )
 
+# NUCI (Capacidade Instalada) – COINCIDENTE
+    try:
+        df_nuci = carregar_nuci_csv()  # já existe no seu arquivo
+        if df_nuci is not None and not df_nuci.empty:
+            df_nuci = df_nuci.sort_values("data")
+            v_last = float(df_nuci["valor"].iloc[-1])
+            ref = df_nuci["data"].iloc[-1].strftime("%m/%Y")
+
+            # variação m/m em p.p.
+            if len(df_nuci) >= 2:
+                v_prev = float(df_nuci["valor"].iloc[-2])
+                delta_pp = v_last - v_prev
+                delta_txt = f"{delta_pp:+.1f} p.p."
+            else:
+                delta_txt = "•"
+
+            linhas.append({
+                "Indicador": "NUCI – utilização da capacidade",
+                "Classificação": "🟡 Coincidente",
+                "Mês ref.": ref,
+                "Var. mensal": delta_txt,     # não é %, é p.p.
+                "Acum. no ano": "•",
+                "Acum. 12 meses": f"{v_last:.1f}%",
+                "Fonte": "CNI (NUCI) – via CSV local",
+            })
+    except Exception as e:
+        linhas.append({
+            "Indicador": "NUCI – utilização da capacidade",
+            "Classificação": "🟡 Coincidente",
+            "Mês ref.": "-",
+            "Var. mensal": f"Erro: {e}",
+            "Acum. no ano": "-",
+            "Acum. 12 meses": "-",
+            "Fonte": "CNI (NUCI) – via CSV local",
+        })
+
+
+
+    # -------------------------------------------------------------------------
+    # IBC-Br – COINCIDENTE
+    # (1) tenta CSV offline-first em data/atividade/ibcbr.csv
+    # (2) se não existir, você pode decidir cair pra SGS ou deixar vazio
+    # -------------------------------------------------------------------------
+    def _carregar_ibcbr_offline() -> pd.DataFrame:
+        if not IBC_BR_CSV.exists() or IBC_BR_CSV.stat().st_size == 0:
+            return pd.DataFrame(columns=["data", "valor"])
+        df = pd.read_csv(IBC_BR_CSV)
+        if "data" not in df.columns or "valor" not in df.columns:
+            return pd.DataFrame(columns=["data", "valor"])
+        df["data"] = pd.to_datetime(df["data"], errors="coerce")
+        df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
+        df = df.dropna(subset=["data", "valor"]).sort_values("data").reset_index(drop=True)
+        return df
+
+
+    try:
+        df_ibc = _carregar_ibcbr_offline()
+        if len(df_ibc) >= 13:
+            last = df_ibc.iloc[-1]
+            prev = df_ibc.iloc[-2]
+
+            # m/m (%)
+            var_mensal = (float(last["valor"]) / float(prev["valor"]) - 1) * 100.0
+
+            # YTD (%): último / primeiro do ano - 1
+            ano = pd.to_datetime(last["data"]).year
+            first_year = df_ibc[df_ibc["data"].dt.year == ano].iloc[0]
+            acum_ano = (float(last["valor"]) / float(first_year["valor"]) - 1) * 100.0
+
+            # 12m (%): último / 12m atrás - 1
+            v_12m = float(df_ibc.iloc[-13]["valor"])
+            acum_12m = (float(last["valor"]) / v_12m - 1) * 100.0
+
+            linhas.append(
+                {
+                    "Indicador": "IBC-Br (BCB) – índice",
+                    "Mês ref": _formata_mes(pd.to_datetime(last["data"])),
+                    "Nível": round(float(last["valor"]), 2),
+                    "Var. mensal": round(var_mensal, 2),
+                    "Acum. ano": round(acum_ano, 2),
+                    "Acum. 12m": round(acum_12m, 2),
+                    "Classificação": "🟡 Coincidente",
+                    "Fonte": "BCB (CSV offline)",
+                }
+            )
+    except Exception:
+        pass
+
+
     return pd.DataFrame(linhas)
+
 
 
 @lru_cache(maxsize=1)
@@ -4521,60 +4720,545 @@ def render_bloco4_mercado_trabalho():
 
 
 def render_bloco5_atividade(df_ativ: pd.DataFrame):
-    # Se vier vazio, mostra aviso amigável
     if df_ativ is None or df_ativ.empty:
         st.info("Ainda não há dados de atividade econômica disponíveis.")
         return
 
+    st.markdown("### Atividade econômica – Indicadores (IBGE/FGV)")
+    st.caption("Indicadores classificados em antecedentes, coincidentes e defasados do ciclo econômico.")
 
-    # ---------------- TÍTULO + DESCRIÇÃO (fora do card) ----------------
-    st.markdown("### Atividade econômica – IBGE")
-    st.caption(
-        "Indicadores de volume de Varejo (PMC), Serviços (PMS) e Indústria (PIM-PF), "
-        "classificados como indicadores coincidentes do ciclo econômico."
-    )
-
-    # ---------------- CARD ION (igual espírito dos outros blocos) ----------------
-    # Tudo que é “conteúdo” do bloco (título pequeno + filtro + tabela)
-    # fica dentro desse container, que o theme_ion estiliza como card.
     with st.container(border=True):
+        st.markdown("##### Classificação cíclica dos indicadores")
 
-        # Linha do subtítulo + filtro (2 colunas, estilo Ion)
-        col_label, col_filtro = st.columns([3, 1])
+        # -----------------------------
+        # Helpers locais (não mexe no resto do projeto)
+        # -----------------------------
+        def _fmt_pts(x, signed=False):
+            if x is None:
+                return "•"
+            try:
+                v = float(x)
+            except Exception:
+                return "•"
+            s = f"{v:+.1f}" if signed else f"{v:.1f}"
+            return f"{s.replace('.', ',')} pts"
+        
 
-        with col_label:
-            st.markdown("##### Classificação cíclica dos indicadores")
+        # --- CSS simples do ícone/tooltip (usa o tooltip nativo do browser via title="...") ---
+        st.markdown(
+            """
+        <style>
+        /* mantém o look da tabela padrão (classe dataframe já é usada abaixo) */
+        table.dataframe { width: 100%; }
 
-        with col_filtro:
-            filtro_classif = st.radio(
-                "Classificação",
-                ["Coincidente", "Todos"],
-                index=0,  # Coincidente como padrão
-                key="filtro_atividade_ibge",
-                horizontal=True,  # fica lado a lado, menos poluição visual
+        /* ícone de informação */
+        .ion-info {
+        margin-left: 6px;
+        font-size: 0.92em;
+        opacity: 0.75;
+        cursor: help;
+        }
+        .ion-info:hover { opacity: 1; }
+        </style>
+        """,
+            unsafe_allow_html=True,
+        )
+
+        # --- Descrição curta (aparece no tooltip) ---
+        _FGV_DESC = {
+            "ICC": "ICC: Confiança do consumidor (percepção atual + expectativas).",
+            "ICE": "ICE: Confiança empresarial (síntese de indústria, serviços, comércio e construção).",
+            "ICI": "ICI: Confiança da indústria (situação atual + expectativas).",
+            "ICS": "ICS: Confiança de serviços (situação atual + expectativas).",
+            "ICOM": "ICOM: Confiança do comércio (situação atual + expectativas).",
+            "ICST": "ICST: Confiança da construção (situação atual + expectativas).",
+        }
+
+        def _fgv_stats_22plus(sigla: str):
+            """
+            Retorna estatísticas do nível (pontos) na janela >= 2022-01.
+            Usa consolidado: data/sondagens_fgv/sondagens_fgv_consolidado.csv
+            (mesmo CSV que você já confirmou que existe e tem colunas.)
+            """
+            try:
+                if not sigla:
+                    return None
+                sig = str(sigla).upper()
+                cut = pd.Timestamp("2022-01-01")
+
+                # cache simples para não reler CSV toda hora
+                if not hasattr(_fgv_stats_22plus, "_cache"):
+                    _fgv_stats_22plus._cache = {}
+                cache = _fgv_stats_22plus._cache
+
+                if "dfc" not in cache:
+                    arq_c = DATA_DIR / "sondagens_fgv" / "sondagens_fgv_consolidado.csv"
+                    if arq_c.exists() and arq_c.stat().st_size > 0:
+                        try:
+                            cache["dfc"] = pd.read_csv(arq_c)
+                        except Exception:
+                            cache["dfc"] = None
+                    else:
+                        cache["dfc"] = None
+
+                dfc = cache.get("dfc")
+                if dfc is None or dfc.empty:
+                    return None
+
+                df = dfc[dfc["sigla"].astype(str).str.upper() == sig].copy()
+                if df.empty:
+                    return None
+
+                df["mes_ref"] = pd.to_datetime(df["mes_ref"], errors="coerce")
+                df["pontos"] = pd.to_numeric(df["pontos"], errors="coerce")
+                df = df.dropna(subset=["mes_ref", "pontos"]).sort_values("mes_ref")
+                win = df[df["mes_ref"] >= cut].copy()
+                if win.empty:
+                    return None
+
+                # min / max com o mês
+                i_min = win["pontos"].idxmin()
+                i_max = win["pontos"].idxmax()
+                r_min = win.loc[i_min]
+                r_max = win.loc[i_max]
+
+                out = {
+                    "n": int(len(win)),
+                    "mean": float(win["pontos"].mean()),
+                    "min": float(r_min["pontos"]),
+                    "min_mes": pd.to_datetime(r_min["mes_ref"]).strftime("%m/%Y"),
+                    "max": float(r_max["pontos"]),
+                    "max_mes": pd.to_datetime(r_max["mes_ref"]).strftime("%m/%Y"),
+                }
+                return out
+            except Exception:
+                return None
+
+        def _tooltip_text(sigla: str) -> str:
+            sig = str(sigla).upper()
+            desc = _FGV_DESC.get(sig, f"{sig}: Índice de confiança (FGV).")
+            stt = _fgv_stats_22plus(sig)
+            if not stt:
+                return desc
+            # Quebra de linha no tooltip: usar &#10; no HTML depois
+            return (
+                f"{desc}\n"
+                f"Pós-2022 (n={stt['n']}): média {stt['mean']:.1f} | "
+                f"mín {stt['min']:.1f} ({stt['min_mes']}) | "
+                f"máx {stt['max']:.1f} ({stt['max_mes']})"
             )
 
-        # --------- LÓGICA DO FILTRO (igual você já tinha) ---------
-        df_exibir = df_ativ.copy()
+        def _tooltip_attr(sigla: str) -> str:
+            # escapa aspas e transforma \n em quebra de linha do tooltip HTML
+            txt = _tooltip_text(sigla)
+            return _html.escape(txt, quote=True).replace("\n", "&#10;")
 
-        if filtro_classif != "Todos":
-            df_exibir = df_exibir[
-                df_exibir["Classificação"]
-                .astype(str)
-                .str.contains(filtro_classif, case=False, na=False)
-            ]
+        def _render_table_html(df_: pd.DataFrame):
+            # mantém classe dataframe para herdar o CSS do tema
+            html_table = df_.to_html(index=False, escape=False, classes="dataframe")
+            st.markdown(html_table, unsafe_allow_html=True)
 
-        # --------- TABELA NO PADRÃO ION ---------
-        st.table(
-        df_exibir.set_index(["Indicador", "Classificação"])
-    )
 
-    # ---------------- AVISO EMBAIXO (fora do card, igual outros blocos) ----------------
-    st.info(
-        "⚙️ Em construção (parte avançada): inclusão de indicadores antecedentes "
-        "(PMI, confiança FGV) e defasados (desemprego, massa salarial), "
-        "todos com a mesma lógica de classificação cíclica."
-    )
+        def _fmt_pct(x):
+            if x is None:
+                return "•"
+            try:
+                v = float(x)
+            except Exception:
+                return "•"
+            return f"{v:.0f}%"
+
+        def _fgv_percentil_22plus(sigla: str):
+            """
+            Percentil do nível atual dentro da amostra pós-pandemia (>= 2022-01).
+            Usa consolidado: data/sondagens_fgv/sondagens_fgv_consolidado.csv
+            Fallback:        data/sondagens_fgv/{sigla}_fgv.csv
+            """
+            try:
+                if not sigla:
+                    return None
+                sig = str(sigla).upper()
+                cut = pd.Timestamp("2022-01-01")
+
+                # cache (reaproveita o mesmo padrão do delta)
+                if not hasattr(_fgv_percentil_22plus, "_cache"):
+                    _fgv_percentil_22plus._cache = {}
+                cache = _fgv_percentil_22plus._cache
+
+                df = None
+
+                # 1) consolidado
+                if "dfc" not in cache:
+                    arq_c = DATA_DIR / "sondagens_fgv" / "sondagens_fgv_consolidado.csv"
+                    if arq_c.exists() and arq_c.stat().st_size > 0:
+                        try:
+                            cache["dfc"] = pd.read_csv(arq_c)
+                        except Exception:
+                            cache["dfc"] = None
+                    else:
+                        cache["dfc"] = None
+
+                dfc = cache.get("dfc")
+                if dfc is not None and not dfc.empty and "sigla" in dfc.columns:
+                    dfx = dfc[dfc["sigla"].astype(str).str.upper() == sig].copy()
+                    if not dfx.empty:
+                        df = dfx
+
+                # 2) fallback individual
+                if df is None:
+                    arq = DATA_DIR / "sondagens_fgv" / f"{sig.lower()}_fgv.csv"
+                    if not arq.exists() or arq.stat().st_size == 0:
+                        return None
+                    df = pd.read_csv(arq)
+
+                if df is None or df.empty or "mes_ref" not in df.columns or "pontos" not in df.columns:
+                    return None
+
+                df["mes_ref"] = pd.to_datetime(df["mes_ref"], errors="coerce")
+                df["pontos"] = pd.to_numeric(df["pontos"], errors="coerce")
+                df = df.dropna(subset=["mes_ref", "pontos"]).sort_values("mes_ref")
+
+                if df.empty:
+                    return None
+
+                # nível atual = último mês disponível
+                v_atual = float(df.iloc[-1]["pontos"])
+
+                # janela pós-pandemia
+                win = df[df["mes_ref"] >= cut]
+                if win.empty:
+                    return None
+
+                x = win["pontos"].astype(float)
+                n = len(x)
+                if n < 12:  # evita percentil “mentiroso” com amostra muito curta
+                    return None
+
+                pct = 100.0 * (x.le(v_atual).sum() / n)
+                return pct
+            except Exception:
+                return None
+
+        def _quartil_label_from_pct_top(pct: float) -> str:
+            """
+            Aqui '1º quartil' = TOP 25% (melhor), como você quer na tela.
+            pct = percentil (0..100), onde 100 = topo (muito alto), 0 = fundo (muito baixo).
+            """
+            if pct is None or (isinstance(pct, float) and math.isnan(pct)):
+                return "•"
+            pct = float(pct)
+
+            if pct >= 75:
+                return "1º quartil (muito forte)"
+            if pct >= 50:
+                return "2º quartil (forte)"
+            if pct >= 25:
+                return "3º quartil (fraco)"
+            return "4º quartil (muito fraco)"
+
+        def _fgv_stats_22plus(sigla: str):
+            """
+            Retorna min/média/máx e n na janela 2022+ (mesma janela do percentil).
+            Usa o consolidado: data/sondagens_fgv/sondagens_fgv_consolidado.csv
+            """
+            try:
+                if not sigla:
+                    return None
+                sig = str(sigla).upper()
+                cut = pd.Timestamp("2022-01-01")
+
+                # reaproveita o mesmo cache do percentil, se existir
+                dfc = None
+                if hasattr(_fgv_percentil_22plus, "_cache"):
+                    dfc = getattr(_fgv_percentil_22plus, "_cache", {}).get("dfc")
+
+                if dfc is None:
+                    arq_c = DATA_DIR / "sondagens_fgv" / "sondagens_fgv_consolidado.csv"
+                    if not arq_c.exists() or arq_c.stat().st_size == 0:
+                        return None
+                    dfc = pd.read_csv(arq_c)
+
+                dfx = dfc[dfc["sigla"].astype(str).str.upper() == sig].copy()
+                if dfx.empty:
+                    return None
+
+                dfx["mes_ref"] = pd.to_datetime(dfx["mes_ref"], errors="coerce")
+                dfx = dfx.dropna(subset=["mes_ref"])
+                dfx = dfx[dfx["mes_ref"] >= cut].copy()
+                if dfx.empty:
+                    return None
+
+                vals = pd.to_numeric(dfx["pontos"], errors="coerce").dropna()
+                if vals.empty:
+                    return None
+
+                return {
+                    "n": int(vals.shape[0]),
+                    "min": float(vals.min()),
+                    "mean": float(vals.mean()),
+                    "max": float(vals.max()),
+                }
+            except Exception:
+                return None
+
+        _FGV_DESC = {
+            "ICE": "Índice de Confiança Empresarial (síntese de confiança do setor empresarial).",
+            "ICC": "Índice de Confiança do Consumidor (humor das famílias/consumo).",
+            "ICI": "Índice de Confiança da Indústria (humor da indústria).",
+            "ICS": "Índice de Confiança de Serviços (humor do setor de serviços).",
+            "ICOM": "Índice de Confiança do Comércio (humor do varejo/comércio).",
+            "ICST": "Índice de Confiança da Construção (humor da construção).",
+        }
+
+        def _with_tooltip_indicador(label: str, sigla: str) -> str:
+            """
+            Retorna HTML com tooltip (title) + ícone ⓘ visível.
+            """
+            sig = (str(sigla).upper() if sigla else "")
+            desc = _FGV_DESC.get(sig, "Índice de confiança (FGV). Valores mais altos indicam maior confiança.")
+
+            stt = _fgv_stats_22plus(sig)  # pode ter min/mean/max (e às vezes mês)
+            if stt:
+                # tenta pegar mês do min/max se existir
+                min_txt = f"{stt['min']:.1f}" + (f" ({stt.get('min_mes')})" if stt.get("min_mes") else "")
+                max_txt = f"{stt['max']:.1f}" + (f" ({stt.get('max_mes')})" if stt.get("max_mes") else "")
+                tip = (
+                    f"{sig} — {desc}\n"
+                    f"Janela: 2022+ (n={stt['n']})\n"
+                    f"Mín: {min_txt} | Média: {stt['mean']:.1f} | Máx: {max_txt}"
+                )
+            else:
+                tip = f"{sig} — {desc}"
+
+            tip_html = html.escape(tip).replace("\n", "&#10;")
+            label_html = html.escape(str(label))
+
+            return (
+                f"<span class='fgv-ind' title='{tip_html}'>{label_html}</span>"
+                f"<span class='fgv-info' title='{tip_html}'>ⓘ</span>"
+            )
+
+
+        def _render_table_html(df: pd.DataFrame):
+            """
+            Renderiza tabela HTML (permite tooltip por célula).
+            """
+            css = """
+            <style>
+            .fgv_tbl table { width: 100%; border-collapse: collapse; }
+            .fgv_tbl th, .fgv_tbl td { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+            .fgv_tbl th { font-weight: 600; text-align: left; }
+            .fgv_tbl tr:hover td { background: rgba(255,255,255,0.03); }
+
+            /* tooltip / ícone */
+            .fgv-ind { cursor: help; }
+            .fgv-info{
+                display: inline-block;
+                margin-left: 6px;
+                font-size: 12px;
+                line-height: 1;
+                opacity: 0.75;
+                cursor: help;
+                user-select: none;
+            }
+            .fgv-info:hover { opacity: 1; }
+            </style>
+            """
+            st.markdown(css, unsafe_allow_html=True)
+            st.markdown(f"<div class='fgv_tbl'>{df.to_html(index=False, escape=False)}</div>", unsafe_allow_html=True)
+
+
+
+        def _quartil_forca_from_pct(pct: float) -> str:
+            # pct é "percentil por baixo": 0 = muito baixo, 100 = muito alto
+            if pct is None:
+                return "•"
+
+            # Queremos: TOP 25% = 1º quartil (muito forte)
+            if pct >= 75:
+                return "1º quartil (muito forte)"
+            elif pct >= 50:
+                return "2º quartil (forte)"
+            elif pct >= 25:
+                return "3º quartil (fraco)"
+            else:
+                return "4º quartil (muito fraco)"
+            
+
+        def _extract_sigla(indicador: str):
+            # pega (ICC), (ICE), etc dentro do texto "Confiança ... (ICC) – nível"
+            m = re.search(r"\((ICC|ICI|ICS|ICOM|ICST|ICE)\)", str(indicador))
+            return m.group(1) if m else None
+
+        def _fgv_delta_pts(sigla: str, meses_atras: int):
+            """Calcula (pontos do último mês) - (pontos de N meses atrás).
+
+            Preferência: data/sondagens_fgv/sondagens_fgv_consolidado.csv
+            Fallback:    data/sondagens_fgv/{sigla_lower}_fgv.csv
+            """
+            try:
+                if not sigla:
+                    return None
+
+                sig = str(sigla).upper()
+
+                # cache (evita reler CSV a cada linha)
+                if not hasattr(_fgv_delta_pts, "_cache"):
+                    _fgv_delta_pts._cache = {}
+                cache = _fgv_delta_pts._cache
+
+                df = None
+
+                # 1) consolidado
+                if "dfc" not in cache:
+                    arq_c = DATA_DIR / "sondagens_fgv" / "sondagens_fgv_consolidado.csv"
+                    if arq_c.exists() and arq_c.stat().st_size > 0:
+                        try:
+                            cache["dfc"] = pd.read_csv(arq_c)
+                        except Exception:
+                            cache["dfc"] = None
+                    else:
+                        cache["dfc"] = None
+
+                dfc = cache.get("dfc", None)
+                if dfc is not None and not dfc.empty and "sigla" in dfc.columns:
+                    dfx = dfc[dfc["sigla"].astype(str).str.upper() == sig].copy()
+                    if dfx is not None and not dfx.empty:
+                        df = dfx
+
+                # 2) fallback individual
+                if df is None:
+                    arq = DATA_DIR / "sondagens_fgv" / f"{sig.lower()}_fgv.csv"
+                    if not arq.exists() or arq.stat().st_size == 0:
+                        return None
+                    df = pd.read_csv(arq)
+
+                if df is None or df.empty or "mes_ref" not in df.columns or "pontos" not in df.columns:
+                    return None
+
+                df["mes_ref"] = pd.to_datetime(df["mes_ref"], errors="coerce")
+                df = df.dropna(subset=["mes_ref"]).sort_values("mes_ref")
+                if df.empty:
+                    return None
+                
+                df["pontos"] = pd.to_numeric(df["pontos"], errors="coerce")
+                df = df.dropna(subset=["pontos"])
+                if df.empty:
+                    return None
+
+                df["per"] = df["mes_ref"].dt.to_period("M")
+                per_last = df["per"].iloc[-1]
+                per_target = per_last - int(meses_atras)
+
+                row_last = df.iloc[-1]
+                row_target = df[df["per"] == per_target]
+                if row_target.empty:
+                    return None
+
+                v_last = float(row_last["pontos"])
+                v_prev = float(row_target.iloc[-1]["pontos"])
+                return v_last - v_prev
+            except Exception:
+                return None
+        # -----------------------------
+        # Base
+        # -----------------------------
+        df_base = df_ativ.copy()
+
+        # Garante colunas esperadas (evita quebrar se alguma vier faltando)
+        for col in ["Indicador", "Classificação", "Mês ref.", "Var. mensal", "Acum. no ano", "Acum. 12 meses", "Fonte"]:
+            if col not in df_base.columns:
+                df_base[col] = "•"
+
+        # Separa por tipo (sem radios / sem filtros)
+        df_ant = df_base[df_base["Classificação"].astype(str).str.contains("Antecedente", na=False)].copy()
+        df_coi = df_base[df_base["Classificação"].astype(str).str.contains("Coincidente", na=False)].copy()
+        df_def = df_base[df_base["Classificação"].astype(str).str.contains("Defasado", na=False)].copy()
+
+        # -----------------------------
+        # 1) ANTECEDENTES (FGV) — colunas “de gestor”
+        #    - Nível
+        #    - Δ m/m (pts)
+        #    - Δ 3m (pts)
+        #    - Δ 12m (pts)
+        # -----------------------------
+        if not df_ant.empty:
+            df_ant["sigla"] = df_ant["Indicador"].apply(_extract_sigla)
+
+            df_ant["Δ 3m"] = df_ant["sigla"].apply(lambda s: _fmt_pts(_fgv_delta_pts(s, 3), signed=True) if s else "•")
+            df_ant["Δ 12m"] = df_ant["sigla"].apply(lambda s: _fmt_pts(_fgv_delta_pts(s, 12), signed=True) if s else "•")
+            
+            # percentil numérico (0..100) e quartil (onde 1º = TOP 25%)
+            df_ant["_pct22"] = df_ant["sigla"].apply(lambda s: _fgv_percentil_22plus(s) if s else None)
+            df_ant["Quartil (2022+)"] = df_ant["_pct22"].apply(_quartil_label_from_pct_top)
+
+            # Seu dataframe “cru” usa "Acum. 12 meses" para guardar o nível (FGV)
+            df_ant_view = df_ant.rename(
+                columns={
+                    "Var. mensal": "Δ m/m",
+                    "Acum. 12 meses": "Nível",
+                    "Acum. no ano": "No ano (YTD)",
+                }
+            )
+
+            # tooltip no nome do indicador (usa sigla da própria linha)
+            df_ant_view["Indicador"] = df_ant_view.apply(
+                lambda r: _with_tooltip_indicador(r["Indicador"], r.get("sigla")),
+                axis=1
+            )
+
+            # Mantém só o que faz sentido para antecedente
+            df_ant_view = df_ant_view[
+                ["Indicador", "Mês ref.", "Δ m/m", "Δ 3m", "Δ 12m", "Quartil (2022+)", "Nível", "Fonte"]
+            ].copy()
+
+            # Ordenação simples e estável
+            df_ant_view = df_ant_view.sort_values(["Mês ref.", "Fonte", "Nível"], ascending=[False, True, False])
+
+            st.markdown("**Antecedentes (Confiança – FGV)**")
+            _render_table_html(df_ant_view)
+
+
+        # -----------------------------
+        # 2) COINCIDENTES (IBGE) — padrão IBGE
+        #    - Δ m/m (%)
+        #    - No ano (YTD)
+        #    - 12m (%)
+        # -----------------------------
+        if not df_coi.empty:
+            df_coi_view = df_coi.rename(
+                columns={
+                    "Var. mensal": "Δ m/m",
+                    "Acum. 12 meses": "12m",
+                    "Acum. no ano": "No ano (YTD)",
+                }
+            )
+            df_coi_view = df_coi_view[["Indicador", "Mês ref.", "Δ m/m", "No ano (YTD)", "12m", "Fonte"]].copy()
+            df_coi_view = df_coi_view.sort_values(["Indicador"])
+
+            st.markdown("**Coincidentes (Atividade – IBGE)**")
+            df_coi_view.index = [""] * len(df_coi_view)
+            st.table(df_coi_view)
+
+        # -----------------------------
+        # 3) DEFASADOS (se você adicionar depois)
+        # -----------------------------
+        if not df_def.empty:
+            df_def_view = df_def.rename(
+                columns={
+                    "Var. mensal": "Δ m/m",
+                    "Acum. 12 meses": "12m",
+                    "Acum. no ano": "No ano (YTD)",
+                }
+            )
+            df_def_view = df_def_view[["Indicador", "Mês ref.", "Δ m/m", "No ano (YTD)", "12m", "Fonte"]].copy()
+            df_def_view = df_def_view.sort_values(["Indicador"])
+
+            st.markdown("**Defasados**")
+            df_def_view.index = [""] * len(df_def_view)
+            st.table(df_def_view)
+
+
 
 
 def render_bloco_expectativas_focus(
