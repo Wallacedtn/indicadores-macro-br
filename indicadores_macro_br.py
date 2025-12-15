@@ -5191,6 +5191,12 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
             # percentil numérico (0..100) e quartil (onde 1º = TOP 25%)
             df_ant["_pct22"] = df_ant["sigla"].apply(lambda s: _fgv_percentil_22plus(s) if s else None)
             df_ant["Quartil (2022+)"] = df_ant["_pct22"].apply(_quartil_label_from_pct_top)
+            
+            # --- FIX: evita duplicar "Nível" quando o df_ativ já vem com essa coluna ---
+            if ("Nível" in df_ant.columns) and ("Acum. 12 meses" in df_ant.columns):
+                # Para FGV, o "nível" que você está usando é o que está em "Acum. 12 meses"
+                # (você renomeia ela para "Nível" logo abaixo). Então removemos o "Nível" pré-existente.
+                df_ant = df_ant.drop(columns=["Nível"])
 
             # Seu dataframe “cru” usa "Acum. 12 meses" para guardar o nível (FGV)
             df_ant_view = df_ant.rename(
