@@ -208,6 +208,11 @@ DATA_ATIVIDADE_DIR = DATA_DIR / "atividade"
 NUCI_CSV = DATA_ATIVIDADE_DIR / "nuci_capacidade.csv"
 IBC_BR_CSV = DATA_ATIVIDADE_DIR / "ibcbr.csv"
 
+PIM_CSV = DATA_ATIVIDADE_DIR / "pim_pf.csv"
+PMS_CSV = DATA_ATIVIDADE_DIR / "pms.csv"
+PMC_CSV = DATA_ATIVIDADE_DIR / "pmc.csv"
+
+
 # =============================================================================
 # FUNÇÕES AUXILIARES DE DATA
 # =============================================================================
@@ -311,6 +316,22 @@ def carregar_nuci_csv() -> pd.DataFrame:
     df.columns = ["periodo", "valor"]
 
     df["data"] = df["periodo"].apply(_parse_mes_pt_abrev)
+    mask = df["data"].isna()
+    if mask.any():
+        s = df.loc[mask, "periodo"].astype(str).str.strip()
+
+        # 1) tenta o formato mais comum do seu CSV: MM/YYYY (ex.: 01/2001)
+        dt = pd.to_datetime(s, format="%m/%Y", errors="coerce")
+
+        # 2) fallback: tenta M/YYYY (ex.: 1/2001) ou outros casos
+        mask2 = dt.isna()
+        if mask2.any():
+            dt2 = pd.to_datetime(s[mask2], dayfirst=True, errors="coerce")
+            dt.loc[mask2] = dt2
+
+        df.loc[mask, "data"] = dt.dt.to_period("M").dt.to_timestamp()
+
+
     df["valor"] = pd.to_numeric(df["valor"].astype(str).str.replace(",", "."), errors="coerce")
     df = df.dropna(subset=["data", "valor"]).sort_values("data").reset_index(drop=True)
     return df[["data", "valor"]]
@@ -834,25 +855,45 @@ def _resumo_triple_series(
     }
 
 
-def resumo_pmc_oficial() -> Dict[str, float]:
-    df_mom = buscar_pmc_var_mom_ajustada()
-    df_ano = buscar_pmc_var_acum_ano()
-    df_12 = buscar_pmc_var_acum_12m()
-    return _resumo_triple_series(df_mom, df_ano, df_12)
+def _resumo_ibge_csv(path_csv: Path) -> Dict[str, Optional[float]]:
+    if (not path_csv.exists()) or (path_csv.stat().st_size == 0):
+        return {"referencia": None, "var_mensal": None, "acum_ano": None, "acum_12m": None}
+
+    df = pd.read_csv(path_csv)
+    if "data" not in df.columns:
+        return {"referencia": None, "var_mensal": None, "acum_ano": None, "acum_12m": None}
+
+    df["data"] = pd.to_datetime(df["data"], errors="coerce")
+    for c in ["var_mom", "acum_ano", "acum_12m"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    df = df.dropna(subset=["data"]).sort_values("data").reset_index(drop=True)
+    if df.empty:
+        return {"referencia": None, "var_mensal": None, "acum_ano": None, "acum_12m": None}
+
+    last = df.iloc[-1]
+    ref = last["data"].strftime("%m/%Y")
+
+    return {
+        "referencia": ref,
+        "var_mensal": float(last["var_mom"]) if "var_mom" in df.columns and pd.notna(last.get("var_mom")) else None,
+        "acum_ano": float(last["acum_ano"]) if "acum_ano" in df.columns and pd.notna(last.get("acum_ano")) else None,
+        "acum_12m": float(last["acum_12m"]) if "acum_12m" in df.columns and pd.notna(last.get("acum_12m")) else None,
+    }
 
 
-def resumo_pms_oficial() -> Dict[str, float]:
-    df_mom = buscar_pms_var_mom_ajustada()
-    df_ano = buscar_pms_var_acum_ano()
-    df_12 = buscar_pms_var_acum_12m()
-    return _resumo_triple_series(df_mom, df_ano, df_12)
+def resumo_pim_oficial() -> Dict[str, Optional[float]]:
+    return _resumo_ibge_csv(PIM_CSV)
 
 
-def resumo_pim_oficial() -> Dict[str, float]:
-    df_mom = buscar_pim_var_mom_ajustada()
-    df_ano = buscar_pim_var_acum_ano()
-    df_12 = buscar_pim_var_acum_12m()
-    return _resumo_triple_series(df_mom, df_ano, df_12)
+def resumo_pms_oficial() -> Dict[str, Optional[float]]:
+    return _resumo_ibge_csv(PMS_CSV)
+
+
+def resumo_pmc_oficial() -> Dict[str, Optional[float]]:
+    return _resumo_ibge_csv(PMC_CSV)
+
 
 
 # =============================================================================
@@ -2870,11 +2911,13 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                 "Indicador": "NUCI – utilização da capacidade",
                 "Classificação": "🟡 Coincidente",
                 "Mês ref.": ref,
-                "Var. mensal": delta_txt,     # não é %, é p.p.
+                "Nível": f"{v_last:.1f}%".replace(".", ","),   # nível do NUCI
+                "Var. mensal": delta_txt.replace(".", ","),    # p.p.
                 "Acum. no ano": "•",
-                "Acum. 12 meses": f"{v_last:.1f}%",
+                "Acum. 12 meses": "•",
                 "Fonte": "CNI (NUCI) – via CSV local",
             })
+
     except Exception as e:
         linhas.append({
             "Indicador": "NUCI – utilização da capacidade",
@@ -2926,15 +2969,16 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
             linhas.append(
                 {
                     "Indicador": "IBC-Br (BCB) – índice",
-                    "Mês ref": _formata_mes(pd.to_datetime(last["data"])),
-                    "Nível": round(float(last["valor"]), 2),
-                    "Var. mensal": round(var_mensal, 2),
-                    "Acum. ano": round(acum_ano, 2),
-                    "Acum. 12m": round(acum_12m, 2),
                     "Classificação": "🟡 Coincidente",
+                    "Mês ref.": _formata_mes(pd.to_datetime(last["data"])),
+                    "Nível": f"{float(last['valor']):.2f}".replace(".", ","),   # índice (não é %)
+                    "Var. mensal": f"{var_mensal:.2f}%".replace(".", ","),      # %
+                    "Acum. no ano": f"{acum_ano:.2f}%".replace(".", ","),       # %
+                    "Acum. 12 meses": f"{acum_12m:.2f}%".replace(".", ","),     # %
                     "Fonte": "BCB (CSV offline)",
                 }
             )
+
     except Exception:
         pass
 
@@ -5191,15 +5235,30 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
             # percentil numérico (0..100) e quartil (onde 1º = TOP 25%)
             df_ant["_pct22"] = df_ant["sigla"].apply(lambda s: _fgv_percentil_22plus(s) if s else None)
             df_ant["Quartil (2022+)"] = df_ant["_pct22"].apply(_quartil_label_from_pct_top)
+            
+            # --- FIX: evita duplicar "Nível" quando o df_ativ já vem com essa coluna ---
+            if ("Nível" in df_ant.columns) and ("Acum. 12 meses" in df_ant.columns):
+                # Para FGV, o "nível" que você está usando é o que está em "Acum. 12 meses"
+                # (você renomeia ela para "Nível" logo abaixo). Então removemos o "Nível" pré-existente.
+                df_ant = df_ant.drop(columns=["Nível"])
 
             # Seu dataframe “cru” usa "Acum. 12 meses" para guardar o nível (FGV)
-            df_ant_view = df_ant.rename(
+            df_ant_view = df_ant.copy()
+
+            # 1) Renomeia só o que não conflita
+            df_ant_view = df_ant_view.rename(
                 columns={
                     "Var. mensal": "Δ m/m",
-                    "Acum. 12 meses": "Nível",
                     "Acum. no ano": "No ano (YTD)",
                 }
             )
+
+            # 2) Garante que "Nível" vai existir UMA vez só
+            if "Nível" in df_ant_view.columns:
+                df_ant_view = df_ant_view.drop(columns=["Nível"])
+
+            df_ant_view["Nível"] = df_ant_view["Acum. 12 meses"]
+
 
             # tooltip no nome do indicador (usa sigla da própria linha)
             df_ant_view["Indicador"] = df_ant_view.apply(
@@ -5213,6 +5272,10 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
             ].copy()
 
             # Ordenação simples e estável
+            # proteção: evita erro "The column label 'Nível' is not unique"
+            if not df_ant_view.columns.is_unique:
+                df_ant_view = df_ant_view.loc[:, ~df_ant_view.columns.duplicated()]
+
             df_ant_view = df_ant_view.sort_values(["Mês ref.", "Fonte", "Nível"], ascending=[False, True, False])
 
             st.markdown("**Antecedentes (Confiança – FGV)**")
@@ -5233,12 +5296,30 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
                     "Acum. no ano": "No ano (YTD)",
                 }
             )
-            df_coi_view = df_coi_view[["Indicador", "Mês ref.", "Δ m/m", "No ano (YTD)", "12m", "Fonte"]].copy()
+            df_coi_view = df_coi_view.rename(
+                columns={
+                    "Var. mensal": "Δ m/m",
+                    "Acum. 12 meses": "12m",
+                    "Acum. no ano": "No ano (YTD)",
+                }
+            )
+
+            # garante que “Nível” exista e não fique NaN feio
+            if "Nível" not in df_coi_view.columns:
+                df_coi_view["Nível"] = "•"
+
+            df_coi_view = df_coi_view.fillna("•")
+
+            df_coi_view = df_coi_view[
+                ["Indicador", "Mês ref.", "Nível", "Δ m/m", "No ano (YTD)", "12m", "Fonte"]
+            ].copy()
+
             df_coi_view = df_coi_view.sort_values(["Indicador"])
 
-            st.markdown("**Coincidentes (Atividade – IBGE)**")
-            df_coi_view.index = [""] * len(df_coi_view)
-            st.table(df_coi_view)
+            st.markdown("**Coincidentes (Atividade – IBGE/BCB/CNI)**")
+            _render_table_html(df_coi_view)
+
+
 
         # -----------------------------
         # 3) DEFASADOS (se você adicionar depois)

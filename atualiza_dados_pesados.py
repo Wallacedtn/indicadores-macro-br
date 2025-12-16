@@ -12,6 +12,7 @@ O Streamlit depois só lê os CSVs prontos.
 
 from datetime import datetime
 from pathlib import Path
+import pandas as pd
 
 from curvas_anbima import atualizar_todas_as_curvas
 from di_futuro_b3 import atualizar_historico_di_futuro
@@ -26,6 +27,8 @@ from ipca_ibge import atualizar_ipca_mensal_csv
 from caged_saldo_brasil import atualizar_caged_saldo_brasil_csv
 from fgv_confianca import atualizar_fgv_indice, rebuild_sondagens_fgv_consolidado, importar_sondagens_fgv_csv_wide
 from ibcbr_bcb import atualizar_ibcbr_csv
+from atividade_ibge import atualizar_pim_csv, atualizar_pms_csv, atualizar_pmc_csv
+
 
 
 
@@ -153,10 +156,22 @@ def main() -> None:
     # 13) IBC-Br (BCB/SGS) – atividade (coincidente)
     try:
         print("[13/13] Atualizando IBC-Br (BCB/SGS)...")
-        df_ibc = atualizar_ibcbr_csv()  # deve gerar data/atividade_real/ibcbr.csv
+        out_path = atualizar_ibcbr_csv()  # gera data/atividade/ibcbr.csv
+        df_ibc = pd.read_csv(out_path)
         print(f"    ✔ IBC-Br ok ({len(df_ibc)} linhas).")
     except Exception as e:
         print(f"    ❌ Erro ao atualizar IBC-Br: {e}")
+
+    # 14) IBGE Coincidentes – PIM/PMS/PMC (SIDRA -> CSV)
+    try:
+        print("[14/14] Atualizando IBGE Coincidentes (PIM/PMS/PMC)...")
+        df_pim = atualizar_pim_csv()
+        df_pms = atualizar_pms_csv()
+        df_pmc = atualizar_pmc_csv()
+        print(f"    ✔ PIM ok ({len(df_pim)} linhas) | PMS ok ({len(df_pms)} linhas) | PMC ok ({len(df_pmc)} linhas).")
+    except Exception as e:
+        print(f"    ❌ Erro ao atualizar IBGE Coincidentes: {e}")
+
 
 
     print("=" * 80)
