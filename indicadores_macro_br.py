@@ -211,6 +211,7 @@ IBC_BR_CSV = DATA_ATIVIDADE_DIR / "ibcbr.csv"
 PMC_CSV = DATA_ATIVIDADE_DIR / "pmc.csv"
 PMS_CSV = DATA_ATIVIDADE_DIR / "pms.csv"
 PIM_PF_CSV = DATA_ATIVIDADE_DIR / "pim_pf.csv"
+PIM_CSV = PIM_PF_CSV  # alias (compat)
 
 
 
@@ -2739,6 +2740,20 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
         s = f"{v:+.1f}" if signed else f"{v:.1f}"
         return f"{s.replace('.', ',')} pts"
 
+    def _fmt_pct(x, nd=1, signed=False):
+        """Formata percentual no padrão BR (vírgula) e usa • para ausentes."""
+        if x is None:
+            return "•"
+        try:
+            v = float(x)
+        except Exception:
+            return "•"
+        if pd.isna(v):
+            return "•"
+        s = f"{v:+.{nd}f}" if signed else f"{v:.{nd}f}"
+        return s.replace(".", ",") + "%"
+
+
     # FGV IBRE – Antecedentes (índices de confiança)
     fgv_map = [
         ("ICC",  "Confiança do Consumidor (ICC)"),
@@ -2768,7 +2783,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
             }
         )
 
-    # Varejo (PMC) – COINCIDENTE
+        # Varejo (PMC) – COINCIDENTE
     try:
         r_pmc = resumo_pmc_oficial()
         if r_pmc["referencia"] != "-":
@@ -2777,22 +2792,10 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Indicador": "Varejo (PMC) – volume",
                     "Classificação": "🟡 Coincidente",
                     "Mês ref.": r_pmc["referencia"],
-                    "Var. mensal": (
-                        f"{r_pmc['var_mensal']:.1f}%"
-                        if pd.notna(r_pmc["var_mensal"])
-                        else "-"
-                    ),
-                    "Acum. no ano": (
-                        f"{r_pmc['acum_ano']:.1f}%"
-                        if pd.notna(r_pmc["acum_ano"])
-                        else "-"
-                    ),
-                    "Acum. 12 meses": (
-                        f"{r_pmc['acum_12m']:.1f}%"
-                        if pd.notna(r_pmc["acum_12m"])
-                        else "-"
-                    ),
-                    "Fonte": "IBGE / PMC (SIDRA – Tabela 8880)",
+                    "Var. mensal": _fmt_pct(r_pmc.get("var_mensal"), nd=1),
+                    "Acum. no ano": _fmt_pct(r_pmc.get("acum_ano"), nd=1),
+                    "Acum. 12 meses": _fmt_pct(r_pmc.get("acum_12m"), nd=1),
+                    "Fonte": "IBGE (CSV offline)",
                 }
             )
         else:
@@ -2802,9 +2805,9 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Classificação": "🟡 Coincidente",
                     "Mês ref.": "-",
                     "Var. mensal": "sem dados",
-                    "Acum. no ano": "-",
-                    "Acum. 12 meses": "-",
-                    "Fonte": "IBGE / PMC (SIDRA – Tabela 8880)",
+                    "Acum. no ano": "•",
+                    "Acum. 12 meses": "•",
+                    "Fonte": "IBGE (CSV offline)",
                 }
             )
     except Exception as e:
@@ -2814,9 +2817,9 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                 "Classificação": "🟡 Coincidente",
                 "Mês ref.": "-",
                 "Var. mensal": f"Erro: {e}",
-                "Acum. no ano": "-",
-                "Acum. 12 meses": "-",
-                "Fonte": "IBGE / PMC (SIDRA – Tabela 8880)",    
+                "Acum. no ano": "•",
+                "Acum. 12 meses": "•",
+                "Fonte": "IBGE (CSV offline)",
             }
         )
 
@@ -2829,22 +2832,10 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Indicador": "Serviços (PMS) – volume",
                     "Classificação": "🟡 Coincidente",
                     "Mês ref.": r_pms["referencia"],
-                    "Var. mensal": (
-                        f"{r_pms['var_mensal']:.1f}%"
-                        if pd.notna(r_pms["var_mensal"])
-                        else "-"
-                    ),
-                    "Acum. no ano": (
-                        f"{r_pms['acum_ano']:.1f}%"
-                        if pd.notna(r_pms["acum_ano"])
-                        else "-"
-                    ),
-                    "Acum. 12 meses": (
-                        f"{r_pms['acum_12m']:.1f}%"
-                        if pd.notna(r_pms["acum_12m"])
-                        else "-"
-                    ),
-                    "Fonte": "IBGE / PMS (SIDRA – Tabela 5906)",
+                    "Var. mensal": _fmt_pct(r_pms.get("var_mensal"), nd=1),
+                    "Acum. no ano": _fmt_pct(r_pms.get("acum_ano"), nd=1),
+                    "Acum. 12 meses": _fmt_pct(r_pms.get("acum_12m"), nd=1),
+                    "Fonte": "IBGE (CSV offline)",
                 }
             )
         else:
@@ -2854,9 +2845,9 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Classificação": "🟡 Coincidente",
                     "Mês ref.": "-",
                     "Var. mensal": "sem dados",
-                    "Acum. no ano": "-",
-                    "Acum. 12 meses": "-",
-                    "Fonte": "IBGE / PMS (SIDRA – Tabela 5906)",
+                    "Acum. no ano": "•",
+                    "Acum. 12 meses": "•",
+                    "Fonte": "IBGE (CSV offline)",
                 }
             )
     except Exception as e:
@@ -2866,9 +2857,9 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                 "Classificação": "🟡 Coincidente",
                 "Mês ref.": "-",
                 "Var. mensal": f"Erro: {e}",
-                "Acum. no ano": "-",
-                "Acum. 12 meses": "-",
-                "Fonte": "IBGE / PMS (SIDRA – Tabela 5906)",
+                "Acum. no ano": "•",
+                "Acum. 12 meses": "•",
+                "Fonte": "IBGE (CSV offline)",
             }
         )
 
@@ -2881,22 +2872,10 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Indicador": "Indústria (PIM-PF) – produção física",
                     "Classificação": "🟡 Coincidente",
                     "Mês ref.": r_pim["referencia"],
-                    "Var. mensal": (
-                        f"{r_pim['var_mensal']:.1f}%"
-                        if pd.notna(r_pim["var_mensal"])
-                        else "-"
-                    ),
-                    "Acum. no ano": (
-                        f"{r_pim['acum_ano']:.1f}%"
-                        if pd.notna(r_pim["acum_ano"])
-                        else "-"
-                    ),
-                    "Acum. 12 meses": (
-                        f"{r_pim['acum_12m']:.1f}%"
-                        if pd.notna(r_pim["acum_12m"])
-                        else "-"
-                    ),
-                    "Fonte": "IBGE / PIM-PF (SIDRA – Tabela 8888)",
+                    "Var. mensal": _fmt_pct(r_pim.get("var_mensal"), nd=1),
+                    "Acum. no ano": _fmt_pct(r_pim.get("acum_ano"), nd=1),
+                    "Acum. 12 meses": _fmt_pct(r_pim.get("acum_12m"), nd=1),
+                    "Fonte": "IBGE (CSV offline)",
                 }
             )
         else:
@@ -2906,9 +2885,9 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Classificação": "🟡 Coincidente",
                     "Mês ref.": "-",
                     "Var. mensal": "sem dados",
-                    "Acum. no ano": "-",
-                    "Acum. 12 meses": "-",
-                    "Fonte": "IBGE / PIM-PF (SIDRA – Tabela 8888)",
+                    "Acum. no ano": "•",
+                    "Acum. 12 meses": "•",
+                    "Fonte": "IBGE (CSV offline)",
                 }
             )
     except Exception as e:
@@ -2918,9 +2897,9 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                 "Classificação": "🟡 Coincidente",
                 "Mês ref.": "-",
                 "Var. mensal": f"Erro: {e}",
-                "Acum. no ano": "-",
-                "Acum. 12 meses": "-",
-                "Fonte": "IBGE / PIM-PF (SIDRA – Tabela 8888)",
+                "Acum. no ano": "•",
+                "Acum. 12 meses": "•",
+                "Fonte": "IBGE (CSV offline)",
             }
         )
 
@@ -2936,7 +2915,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
             if len(df_nuci) >= 2:
                 v_prev = float(df_nuci["valor"].iloc[-2])
                 delta_pp = v_last - v_prev
-                delta_txt = f"{delta_pp:+.1f} p.p."
+                delta_txt = f"{delta_pp:+.1f}".replace(".", ",") + " p.p."
             else:
                 delta_txt = "•"
 
@@ -2944,12 +2923,13 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                 "Indicador": "NUCI – utilização da capacidade",
                 "Classificação": "🟡 Coincidente",
                 "Mês ref.": ref,
-                "Nível": f"{v_last:.1f}%".replace(".", ","),   # nível do NUCI
-                "Var. mensal": delta_txt.replace(".", ","),    # p.p.
+                "Nível": f"{v_last:.1f}%".replace(".", ","),
+                "Var. mensal": delta_txt,     # <-- NÃO usa replace aqui
                 "Acum. no ano": "•",
                 "Acum. 12 meses": "•",
                 "Fonte": "CNI (NUCI) – via CSV local",
             })
+
 
     except Exception as e:
         linhas.append({
@@ -5336,6 +5316,9 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
                     "Acum. no ano": "No ano (YTD)",
                 }
             )
+
+            # remove colunas duplicadas (segurança)
+            df_coi_view = df_coi_view.loc[:, ~df_coi_view.columns.duplicated()]
 
             # garante que “Nível” exista e não fique NaN feio
             if "Nível" not in df_coi_view.columns:
