@@ -507,7 +507,7 @@ background:rgba(10,26,29,0.95);">
     st.markdown("&nbsp;", unsafe_allow_html=True)
 
     # ======================= LINHA 2 ==========================
-    col4, col5, col6 = st.columns(3)
+    col4, col5 = st.columns(2)
 
     # Ibovespa – pts – Δ % vs D-1 (com nivel vindo do Ipeadata)
     with col4:
@@ -546,67 +546,8 @@ background:rgba(10,26,29,0.95);">
         )
 
 
-    # DI Futuro ~2 anos – Δ p.p. no dia + abriu/fechou desde o início do ano
-    with col5:
-        di2_taxa = getattr(ativos, "di_2_anos_taxa", None)
-        di2_delta = getattr(ativos, "di_2_anos_delta", None)
-        di2_fonte = getattr(ativos, "di_2_anos_fonte_delta", None)
-        di2_ticker = getattr(ativos, "di_2_anos_ticker", None)
-        di2_delta_ano = getattr(ativos, "di_2_anos_delta_ano", None)
-
-        # título: se tiver ticker, usa ele; senão, mantém o texto antigo
-        if di2_ticker:
-            titulo_di2 = f"{di2_ticker} (B3)"
-        else:
-            titulo_di2 = "DI Futuro ~2 anos (B3)"
-
-        # badge: origem da variação diária (intraday ou vs D-1)
-        if di2_delta is None:
-            badge_di2 = None
-        else:
-            if di2_fonte == "intraday":
-                badge_di2 = "intraday"
-            elif di2_fonte == "D-1":
-                badge_di2 = "vs D-1"
-            else:
-                badge_di2 = None
-
-        # subtexto: abriu/fechou desde o início do ano
-        subtext_di2 = None
-        if di2_delta_ano is not None:
-            # se for muito pequeno (<= 0,01 p.p.), considera estável
-            if abs(di2_delta_ano) < 0.01:
-                subtext_di2 = "estável vs início do ano"
-            elif di2_delta_ano > 0:
-                # abriu
-                subtext_di2 = (
-                    "abriu "
-                    + _format_delta_br(abs(di2_delta_ano), 2)
-                    + " p.p. desde o início do ano"
-                )
-            else:
-                # fechou
-                subtext_di2 = (
-                    "fechou "
-                    + _format_delta_br(abs(di2_delta_ano), 2)
-                    + " p.p. desde o início do ano"
-                )
-
-        metric_card(
-            titulo_di2,
-            di2_taxa,
-            di2_delta,
-            fmt_value="{:.2f}",
-            value_is_pct=False,
-            delta_is_pp=True,
-            badge=badge_di2,
-            icon_html=ICON_PERCENT,
-            subtext=subtext_di2,
-        )
-
-
     # DI Futuro ~5 anos – Δ p.p. no dia + abriu/fechou desde o início do ano
-    with col6:
+    with col5:
         di5_taxa = getattr(ativos, "di_5_anos_taxa", None)
         di5_delta = getattr(ativos, "di_5_anos_delta", None)
         di5_fonte = getattr(ativos, "di_5_anos_fonte_delta", None)

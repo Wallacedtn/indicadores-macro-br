@@ -207,13 +207,9 @@ IPCA_MENSAL_CSV = DATA_PRECOS_DIR / "ipca_mensal_ibge.csv"
 DATA_ATIVIDADE_DIR = DATA_DIR / "atividade"
 NUCI_CSV = DATA_ATIVIDADE_DIR / "nuci_capacidade.csv"
 IBC_BR_CSV = DATA_ATIVIDADE_DIR / "ibcbr.csv"
-
-PMC_CSV = DATA_ATIVIDADE_DIR / "pmc.csv"
-PMS_CSV = DATA_ATIVIDADE_DIR / "pms.csv"
 PIM_PF_CSV = DATA_ATIVIDADE_DIR / "pim_pf.csv"
-PIM_CSV = PIM_PF_CSV  # alias (compat)
-
-
+PMS_CSV = DATA_ATIVIDADE_DIR / "pms.csv"
+PMC_CSV = DATA_ATIVIDADE_DIR / "pmc.csv"
 
 # =============================================================================
 # FUNÇÕES AUXILIARES DE DATA
@@ -318,22 +314,10 @@ def carregar_nuci_csv() -> pd.DataFrame:
     df.columns = ["periodo", "valor"]
 
     df["data"] = df["periodo"].apply(_parse_mes_pt_abrev)
-    mask = df["data"].isna()
-    if mask.any():
-        s = df.loc[mask, "periodo"].astype(str).str.strip()
-
-        # 1) tenta o formato mais comum do seu CSV: MM/YYYY (ex.: 01/2001)
-        dt = pd.to_datetime(s, format="%m/%Y", errors="coerce")
-
-        # 2) fallback: tenta M/YYYY (ex.: 1/2001) ou outros casos
-        mask2 = dt.isna()
-        if mask2.any():
-            dt2 = pd.to_datetime(s[mask2], dayfirst=True, errors="coerce")
-            dt.loc[mask2] = dt2
-
-        df.loc[mask, "data"] = dt.dt.to_period("M").dt.to_timestamp()
-
-
+    # aceita também formato mm/aaaa (ex.: 01/2001)
+    mask_na = df["data"].isna()
+    if mask_na.any():
+        df.loc[mask_na, "data"] = pd.to_datetime(df.loc[mask_na, "periodo"].astype(str).str.strip(), format="%m/%Y", errors="coerce")
     df["valor"] = pd.to_numeric(df["valor"].astype(str).str.replace(",", "."), errors="coerce")
     df = df.dropna(subset=["data", "valor"]).sort_values("data").reset_index(drop=True)
     return df[["data", "valor"]]
@@ -857,77 +841,72 @@ def _resumo_triple_series(
     }
 
 
-def _resumo_ibge_csv(path_csv: Path) -> Dict[str, Optional[float]]:
-    if (not path_csv.exists()) or (path_csv.stat().st_size == 0):
-        return {"referencia": None, "var_mensal": None, "acum_ano": None, "acum_12m": None}
+def _resumo_3metricas_csv_offline(path: Path) -> Dict[str, Optional[float]]:
+    """Lê CSV do IBGE (gerado por atividade_ibge.py) com colunas:
+    data, var_mom, acum_ano, acum_12m.
+    Retorna no formato usado pelos cards/tabelas: referencia + métricas.
 
-    df = pd.read_csv(path_csv)
+    Δ 3m: acumulado dos últimos 3 meses (produto das variações m/m).
+    """
+    empty = {"referencia": "-", "var_mensal": None, "var_3m": None, "acum_ano": None, "acum_12m": None}
+
+    if (not path.exists()) or path.stat().st_size == 0:
+        return empty
+
+    df = pd.read_csv(path)
     if "data" not in df.columns:
-        return {"referencia": None, "var_mensal": None, "acum_ano": None, "acum_12m": None}
+        return empty
 
     df["data"] = pd.to_datetime(df["data"], errors="coerce")
+
     for c in ["var_mom", "acum_ano", "acum_12m"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
+        else:
+            df[c] = pd.NA
 
     df = df.dropna(subset=["data"]).sort_values("data").reset_index(drop=True)
     if df.empty:
-        return {"referencia": None, "var_mensal": None, "acum_ano": None, "acum_12m": None}
+        return empty
 
     last = df.iloc[-1]
-    ref = last["data"].strftime("%m/%Y")
+
+    # Δ 3m: acumulado dos últimos 3 meses (produto das variações m/m)
+    var_3m = None
+    try:
+        s = pd.to_numeric(df["var_mom"], errors="coerce").dropna()
+        if len(s) >= 3:
+            prod = 1.0
+            for v in s.iloc[-3:].astype(float).tolist():
+                prod *= (1.0 + (v / 100.0))
+            var_3m = (prod - 1.0) * 100.0
+    except Exception:
+        var_3m = None
 
     return {
-        "referencia": ref,
-        "var_mensal": float(last["var_mom"]) if "var_mom" in df.columns and pd.notna(last.get("var_mom")) else None,
-        "acum_ano": float(last["acum_ano"]) if "acum_ano" in df.columns and pd.notna(last.get("acum_ano")) else None,
-        "acum_12m": float(last["acum_12m"]) if "acum_12m" in df.columns and pd.notna(last.get("acum_12m")) else None,
-    }
-
-def _ler_ibge_coincidente_csv(csv_path: Path) -> pd.DataFrame:
-    """Lê um CSV local (gerado por atividade_ibge.py) com colunas: data, var_mom, acum_ano, acum_12m."""
-    if csv_path is None or not Path(csv_path).exists():
-        return pd.DataFrame()
-    df = pd.read_csv(csv_path)
-    if df.empty:
-        return df
-    for c in ["data", "var_mom", "acum_ano", "acum_12m"]:
-        if c not in df.columns:
-            return pd.DataFrame()
-    df["data"] = pd.to_datetime(df["data"], errors="coerce")
-    for c in ["var_mom", "acum_ano", "acum_12m"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=["data"]).sort_values("data")
-    return df
-
-
-def _resumo_ibge_coincidente(csv_path: Path) -> dict:
-    """Resumo padrão (m/m, YTD, 12m) a partir de CSV local."""
-    df = _ler_ibge_coincidente_csv(csv_path)
-    if df.empty:
-        return {"referencia": None, "var_mensal": None, "acum_ano": None, "acum_12m": None}
-    last = df.iloc[-1]
-    return {
-        "referencia": pd.to_datetime(last["data"]).strftime("%m/%Y"),
+        "referencia": _formata_mes(pd.to_datetime(last["data"])),
         "var_mensal": float(last["var_mom"]) if pd.notna(last["var_mom"]) else None,
+        "var_3m": float(var_3m) if var_3m is not None else None,
         "acum_ano": float(last["acum_ano"]) if pd.notna(last["acum_ano"]) else None,
         "acum_12m": float(last["acum_12m"]) if pd.notna(last["acum_12m"]) else None,
     }
 
 
-def resumo_pmc_oficial() -> dict:
-    """Resumo oficial a partir de CSV local (sem chamadas online no Streamlit)."""
-    return _resumo_ibge_coincidente(PMC_CSV)
-
-def resumo_pms_oficial() -> dict:
-    """Resumo oficial a partir de CSV local (sem chamadas online no Streamlit)."""
-    return _resumo_ibge_coincidente(PMS_CSV)
-
-def resumo_pim_oficial() -> dict:
-    """Resumo oficial a partir de CSV local (sem chamadas online no Streamlit)."""
-    return _resumo_ibge_coincidente(PIM_PF_CSV)
 
 
+def resumo_pmc_oficial() -> Dict[str, Optional[float]]:
+    # Offline-first/only: lê o CSV gerado no update diário
+    return _resumo_3metricas_csv_offline(PMC_CSV)
+
+
+def resumo_pms_oficial() -> Dict[str, Optional[float]]:
+    # Offline-first/only: lê o CSV gerado no update diário
+    return _resumo_3metricas_csv_offline(PMS_CSV)
+
+
+def resumo_pim_oficial() -> Dict[str, Optional[float]]:
+    # Offline-first/only: lê o CSV gerado no update diário
+    return _resumo_3metricas_csv_offline(PIM_PF_CSV)
 
 
 # =============================================================================
@@ -2740,20 +2719,6 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
         s = f"{v:+.1f}" if signed else f"{v:.1f}"
         return f"{s.replace('.', ',')} pts"
 
-    def _fmt_pct(x, nd=1, signed=False):
-        """Formata percentual no padrão BR (vírgula) e usa • para ausentes."""
-        if x is None:
-            return "•"
-        try:
-            v = float(x)
-        except Exception:
-            return "•"
-        if pd.isna(v):
-            return "•"
-        s = f"{v:+.{nd}f}" if signed else f"{v:.{nd}f}"
-        return s.replace(".", ",") + "%"
-
-
     # FGV IBRE – Antecedentes (índices de confiança)
     fgv_map = [
         ("ICC",  "Confiança do Consumidor (ICC)"),
@@ -2783,7 +2748,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
             }
         )
 
-        # Varejo (PMC) – COINCIDENTE
+    # Varejo (PMC) – COINCIDENTE
     try:
         r_pmc = resumo_pmc_oficial()
         if r_pmc["referencia"] != "-":
@@ -2792,10 +2757,27 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Indicador": "Varejo (PMC) – volume",
                     "Classificação": "🟡 Coincidente",
                     "Mês ref.": r_pmc["referencia"],
-                    "Var. mensal": _fmt_pct(r_pmc.get("var_mensal"), nd=1),
-                    "Acum. no ano": _fmt_pct(r_pmc.get("acum_ano"), nd=1),
-                    "Acum. 12 meses": _fmt_pct(r_pmc.get("acum_12m"), nd=1),
-                    "Fonte": "IBGE (CSV offline)",
+                    "Var. mensal": (
+                        f"{r_pmc['var_mensal']:.1f}%"
+                        if pd.notna(r_pmc["var_mensal"])
+                        else "-"
+                    ),
+                    "Var. 3m": (
+                        f"{r_pmc['var_3m']:.1f}%"
+                        if pd.notna(r_pmc["var_3m"])
+                        else "-"
+                    ),
+                    "Acum. no ano": (
+                        f"{r_pmc['acum_ano']:.1f}%"
+                        if pd.notna(r_pmc["acum_ano"])
+                        else "-"
+                    ),
+                    "Acum. 12 meses": (
+                        f"{r_pmc['acum_12m']:.1f}%"
+                        if pd.notna(r_pmc["acum_12m"])
+                        else "-"
+                    ),
+                    "Fonte": "IBGE / PMC (CSV offline)",
                 }
             )
         else:
@@ -2805,9 +2787,9 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Classificação": "🟡 Coincidente",
                     "Mês ref.": "-",
                     "Var. mensal": "sem dados",
-                    "Acum. no ano": "•",
-                    "Acum. 12 meses": "•",
-                    "Fonte": "IBGE (CSV offline)",
+                    "Acum. no ano": "-",
+                    "Acum. 12 meses": "-",
+                    "Fonte": "IBGE / PMC (CSV offline)",
                 }
             )
     except Exception as e:
@@ -2817,9 +2799,9 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                 "Classificação": "🟡 Coincidente",
                 "Mês ref.": "-",
                 "Var. mensal": f"Erro: {e}",
-                "Acum. no ano": "•",
-                "Acum. 12 meses": "•",
-                "Fonte": "IBGE (CSV offline)",
+                "Acum. no ano": "-",
+                "Acum. 12 meses": "-",
+                "Fonte": "IBGE / PMC (CSV offline)",    
             }
         )
 
@@ -2832,10 +2814,27 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Indicador": "Serviços (PMS) – volume",
                     "Classificação": "🟡 Coincidente",
                     "Mês ref.": r_pms["referencia"],
-                    "Var. mensal": _fmt_pct(r_pms.get("var_mensal"), nd=1),
-                    "Acum. no ano": _fmt_pct(r_pms.get("acum_ano"), nd=1),
-                    "Acum. 12 meses": _fmt_pct(r_pms.get("acum_12m"), nd=1),
-                    "Fonte": "IBGE (CSV offline)",
+                    "Var. mensal": (
+                        f"{r_pms['var_mensal']:.1f}%"
+                        if pd.notna(r_pms["var_mensal"])
+                        else "-"
+                    ),
+                    "Var. 3m": (
+                        f"{r_pms['var_3m']:.1f}%"
+                        if pd.notna(r_pms["var_3m"])
+                        else "-"
+                    ),
+                    "Acum. no ano": (
+                        f"{r_pms['acum_ano']:.1f}%"
+                        if pd.notna(r_pms["acum_ano"])
+                        else "-"
+                    ),
+                    "Acum. 12 meses": (
+                        f"{r_pms['acum_12m']:.1f}%"
+                        if pd.notna(r_pms["acum_12m"])
+                        else "-"
+                    ),
+                    "Fonte": "IBGE / PMS (CSV offline)",
                 }
             )
         else:
@@ -2845,9 +2844,9 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Classificação": "🟡 Coincidente",
                     "Mês ref.": "-",
                     "Var. mensal": "sem dados",
-                    "Acum. no ano": "•",
-                    "Acum. 12 meses": "•",
-                    "Fonte": "IBGE (CSV offline)",
+                    "Acum. no ano": "-",
+                    "Acum. 12 meses": "-",
+                    "Fonte": "IBGE / PMS (CSV offline)",
                 }
             )
     except Exception as e:
@@ -2857,9 +2856,9 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                 "Classificação": "🟡 Coincidente",
                 "Mês ref.": "-",
                 "Var. mensal": f"Erro: {e}",
-                "Acum. no ano": "•",
-                "Acum. 12 meses": "•",
-                "Fonte": "IBGE (CSV offline)",
+                "Acum. no ano": "-",
+                "Acum. 12 meses": "-",
+                "Fonte": "IBGE / PMS (CSV offline)",
             }
         )
 
@@ -2872,10 +2871,27 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Indicador": "Indústria (PIM-PF) – produção física",
                     "Classificação": "🟡 Coincidente",
                     "Mês ref.": r_pim["referencia"],
-                    "Var. mensal": _fmt_pct(r_pim.get("var_mensal"), nd=1),
-                    "Acum. no ano": _fmt_pct(r_pim.get("acum_ano"), nd=1),
-                    "Acum. 12 meses": _fmt_pct(r_pim.get("acum_12m"), nd=1),
-                    "Fonte": "IBGE (CSV offline)",
+                    "Var. mensal": (
+                        f"{r_pim['var_mensal']:.1f}%"
+                        if pd.notna(r_pim["var_mensal"])
+                        else "-"
+                    ),
+                    "Var. 3m": (
+                        f"{r_pim['var_3m']:.1f}%"
+                        if pd.notna(r_pim["var_3m"])
+                        else "-"
+                    ),
+                    "Acum. no ano": (
+                        f"{r_pim['acum_ano']:.1f}%"
+                        if pd.notna(r_pim["acum_ano"])
+                        else "-"
+                    ),
+                    "Acum. 12 meses": (
+                        f"{r_pim['acum_12m']:.1f}%"
+                        if pd.notna(r_pim["acum_12m"])
+                        else "-"
+                    ),
+                    "Fonte": "IBGE / PIM-PF (CSV offline)",
                 }
             )
         else:
@@ -2885,9 +2901,9 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Classificação": "🟡 Coincidente",
                     "Mês ref.": "-",
                     "Var. mensal": "sem dados",
-                    "Acum. no ano": "•",
-                    "Acum. 12 meses": "•",
-                    "Fonte": "IBGE (CSV offline)",
+                    "Acum. no ano": "-",
+                    "Acum. 12 meses": "-",
+                    "Fonte": "IBGE / PIM-PF (CSV offline)",
                 }
             )
     except Exception as e:
@@ -2897,39 +2913,86 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                 "Classificação": "🟡 Coincidente",
                 "Mês ref.": "-",
                 "Var. mensal": f"Erro: {e}",
-                "Acum. no ano": "•",
-                "Acum. 12 meses": "•",
-                "Fonte": "IBGE (CSV offline)",
+                "Acum. no ano": "-",
+                "Acum. 12 meses": "-",
+                "Fonte": "IBGE / PIM-PF (CSV offline)",
             }
         )
 
-# NUCI (Capacidade Instalada) – COINCIDENTE
+    # NUCI (Capacidade Instalada) – COINCIDENTE
     try:
-        df_nuci = carregar_nuci_csv()  # já existe no seu arquivo
+        df_nuci = carregar_nuci_csv()
         if df_nuci is not None and not df_nuci.empty:
-            df_nuci = df_nuci.sort_values("data")
-            v_last = float(df_nuci["valor"].iloc[-1])
-            ref = df_nuci["data"].iloc[-1].strftime("%m/%Y")
+            df_nuci = (
+                df_nuci.dropna(subset=["data", "valor"])
+                    .sort_values("data")
+                    .reset_index(drop=True)
+            )
 
-            # variação m/m em p.p.
+            last_date = pd.Timestamp(df_nuci["data"].iloc[-1])
+            v_last = float(df_nuci["valor"].iloc[-1])
+            ref = last_date.strftime("%m/%Y")
+
+            # ---------- helpers de formatação ----------
+            def _fmt_pp(v):
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    return "•"
+                sinal = "+" if v > 0 else ""
+                return f"{sinal}{v:.1f} p.p.".replace(".", ",")
+
+            def _fmt_pct(v):
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    return "•"
+                return f"{v:.1f}%".replace(".", ",")
+
+            # ---------- Δ m/m (p.p.) ----------
+            delta_mom = None
             if len(df_nuci) >= 2:
                 v_prev = float(df_nuci["valor"].iloc[-2])
-                delta_pp = v_last - v_prev
-                delta_txt = f"{delta_pp:+.1f}".replace(".", ",") + " p.p."
+                delta_mom = v_last - v_prev
+
+            # ---------- Δ 3m (p.p.) ----------
+            delta_3m = None
+            try:
+                alvo_3m = last_date - pd.DateOffset(months=3)
+                df_base_3m = df_nuci[df_nuci["data"] <= alvo_3m]
+                base_3m = float(df_base_3m["valor"].iloc[-1]) if not df_base_3m.empty else None
+                delta_3m = (v_last - base_3m) if base_3m is not None else None
+            except Exception:
+                delta_3m = None
+
+            # ---------- YTD (p.p.) ----------
+
+            # base = último dado do ano anterior; fallback: 1º dado do ano corrente
+            ano = last_date.year
+            base_ytd = None
+
+            df_prev_year = df_nuci[df_nuci["data"].dt.year < ano]
+            if not df_prev_year.empty:
+                base_ytd = float(df_prev_year["valor"].iloc[-1])
             else:
-                delta_txt = "•"
+                df_year = df_nuci[df_nuci["data"].dt.year == ano]
+                if not df_year.empty:
+                    base_ytd = float(df_year["valor"].iloc[0])
+
+            delta_ytd = (v_last - base_ytd) if base_ytd is not None else None
+
+            # ---------- Δ 12m (p.p.) ----------
+            alvo_12m = last_date - pd.DateOffset(months=12)
+            df_base_12m = df_nuci[df_nuci["data"] <= alvo_12m]
+            base_12m = float(df_base_12m["valor"].iloc[-1]) if not df_base_12m.empty else None
+            delta_12m = (v_last - base_12m) if base_12m is not None else None
 
             linhas.append({
-                "Indicador": "NUCI – utilização da capacidade",
+                "Indicador": f"NUCI – utilização da capacidade (nível: {_fmt_pct(v_last)})",
                 "Classificação": "🟡 Coincidente",
                 "Mês ref.": ref,
-                "Nível": f"{v_last:.1f}%".replace(".", ","),
-                "Var. mensal": delta_txt,     # <-- NÃO usa replace aqui
-                "Acum. no ano": "•",
-                "Acum. 12 meses": "•",
+                "Var. mensal": _fmt_pp(delta_mom),     # p.p.
+                "Var. 3m": _fmt_pp(delta_3m),          # p.p.
+                "Acum. no ano": _fmt_pp(delta_ytd),    # p.p.
+                "Acum. 12 meses": _fmt_pp(delta_12m),  # p.p.
                 "Fonte": "CNI (NUCI) – via CSV local",
             })
-
 
     except Exception as e:
         linhas.append({
@@ -2941,6 +3004,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
             "Acum. 12 meses": "-",
             "Fonte": "CNI (NUCI) – via CSV local",
         })
+
 
 
 
@@ -2970,6 +3034,10 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
             # m/m (%)
             var_mensal = (float(last["valor"]) / float(prev["valor"]) - 1) * 100.0
 
+            # 3m (%): último / 3m atrás - 1
+            v_3m = float(df_ibc.iloc[-4]["valor"])
+            var_3m = (float(last["valor"]) / v_3m - 1) * 100.0
+
             # YTD (%): último / primeiro do ano - 1
             ano = pd.to_datetime(last["data"]).year
             first_year = df_ibc[df_ibc["data"].dt.year == ano].iloc[0]
@@ -2981,17 +3049,16 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
 
             linhas.append(
                 {
-                    "Indicador": "IBC-Br (BCB) – índice",
+                    "Indicador": f"IBC-Br (BCB) – índice (nível: {_format_br_number(float(last['valor']), 2)})",
                     "Classificação": "🟡 Coincidente",
                     "Mês ref.": _formata_mes(pd.to_datetime(last["data"])),
-                    "Nível": f"{float(last['valor']):.2f}".replace(".", ","),   # índice (não é %)
-                    "Var. mensal": f"{var_mensal:.2f}%".replace(".", ","),      # %
-                    "Acum. no ano": f"{acum_ano:.2f}%".replace(".", ","),       # %
-                    "Acum. 12 meses": f"{acum_12m:.2f}%".replace(".", ","),     # %
+                    "Var. mensal": f"{var_mensal:.2f}%" if pd.notna(var_mensal) else "-",
+                    "Var. 3m": f"{var_3m:.2f}%" if pd.notna(var_3m) else "-",
+                    "Acum. no ano": f"{acum_ano:.2f}%" if pd.notna(acum_ano) else "-",
+                    "Acum. 12 meses": f"{acum_12m:.2f}%" if pd.notna(acum_12m) else "-",
                     "Fonte": "BCB (CSV offline)",
                 }
             )
-
     except Exception:
         pass
 
@@ -5285,54 +5352,65 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
             ].copy()
 
             # Ordenação simples e estável
-            # proteção: evita erro "The column label 'Nível' is not unique"
-            if not df_ant_view.columns.is_unique:
-                df_ant_view = df_ant_view.loc[:, ~df_ant_view.columns.duplicated()]
+            # --- FIX: evita erro pandas "The column label 'Nível' is not unique"
+            # 1) normaliza nomes (trim) e 2) remove duplicadas mantendo a última (normalmente a mais "recente/correta")
+            df_ant_view.columns = pd.Index(df_ant_view.columns).map(lambda x: str(x).strip())
+            if df_ant_view.columns.duplicated().any():
+                df_ant_view = df_ant_view.loc[:, ~df_ant_view.columns.duplicated(keep="last")].copy()
 
-            df_ant_view = df_ant_view.sort_values(["Mês ref.", "Fonte", "Nível"], ascending=[False, True, False])
+            # Ordenação simples e estável (só usa 'Nível' se existir e estiver único)
+            sort_cols = ["Mês ref.", "Fonte"]
+            ascending = [False, True]
+            if "Nível" in df_ant_view.columns and list(df_ant_view.columns).count("Nível") == 1:
+                sort_cols.append("Nível")
+                ascending.append(False)
+
+            df_ant_view = df_ant_view.sort_values(sort_cols, ascending=ascending)
 
             st.markdown("**Antecedentes (Confiança – FGV)**")
             _render_table_html(df_ant_view)
 
-
         # -----------------------------
-        # 2) COINCIDENTES (IBGE) — padrão IBGE
-        #    - Δ m/m (%)
-        #    - No ano (YTD)
-        #    - 12m (%)
+        # 2) COINCIDENTES (Atividade – IBGE/BCB/NUCI)
+        #    Gestor-like: momentum curto (m/m e 3m) + tendência (12m)
+        #    Obs.: "No ano (YTD)" segue calculado (útil pra alguns relatórios), mas por padrão não exibimos.
         # -----------------------------
         if not df_coi.empty:
             df_coi_view = df_coi.rename(
                 columns={
                     "Var. mensal": "Δ m/m",
-                    "Acum. 12 meses": "12m",
+                    "Var. 3m": "Δ 3m",
                     "Acum. no ano": "No ano (YTD)",
-                }
-            )
-            df_coi_view = df_coi_view.rename(
-                columns={
-                    "Var. mensal": "Δ m/m",
                     "Acum. 12 meses": "12m",
-                    "Acum. no ano": "No ano (YTD)",
                 }
             )
 
-            # remove colunas duplicadas (segurança)
-            df_coi_view = df_coi_view.loc[:, ~df_coi_view.columns.duplicated()]
+            cols = ["Indicador", "Mês ref.", "Δ m/m"]
+            if "Δ 3m" in df_coi_view.columns:
+                cols.append("Δ 3m")
+            cols += ["12m", "Fonte"]
 
-            # garante que “Nível” exista e não fique NaN feio
-            if "Nível" not in df_coi_view.columns:
-                df_coi_view["Nível"] = "•"
+            df_coi_view = df_coi_view[cols].copy()
 
-            df_coi_view = df_coi_view.fillna("•")
+            def _ord_coi(ind: str) -> int:
+                s = str(ind)
+                if s.startswith("IBC-Br"):
+                    return 0
+                if s.startswith("Indústria (PIM-PF)"):
+                    return 1
+                if s.startswith("NUCI"):
+                    return 2
+                if s.startswith("Serviços (PMS)"):
+                    return 3
+                if s.startswith("Varejo (PMC)"):
+                    return 4
+                return 99
 
-            df_coi_view = df_coi_view[
-                ["Indicador", "Mês ref.", "Nível", "Δ m/m", "No ano (YTD)", "12m", "Fonte"]
-            ].copy()
+            df_coi_view["_ord"] = df_coi_view["Indicador"].apply(_ord_coi)
+            df_coi_view = df_coi_view.sort_values(["_ord", "Indicador"]).drop(columns=["_ord"])
 
-            df_coi_view = df_coi_view.sort_values(["Indicador"])
-
-            st.markdown("**Coincidentes (Atividade – IBGE/BCB/CNI)**")
+            st.markdown("**Coincidentes (Atividade – IBGE)**")
+            st.caption("Δ 3m = acumulado dos últimos 3 meses (produto das variações m/m). Para NUCI, deltas em p.p.")
             _render_table_html(df_coi_view)
 
 

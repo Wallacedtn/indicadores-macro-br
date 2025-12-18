@@ -1,6 +1,7 @@
 # dados_curto_prazo_br.py
 # -*- coding: utf-8 -*-
 
+import os
 import pandas as pd
 import requests
 from dataclasses import dataclass
@@ -803,6 +804,52 @@ def _delta_di_vs_inicio_ano(
     return taxa_atual - taxa_ini
 
 
+
+# =============================================================================
+# DI FUTURO – preferência de contrato (~5y) para evitar alternância de ticker
+# =============================================================================
+DI_FUTURO_5Y_TICKER = os.getenv("DI_FUTURO_5Y_TICKER", "").strip() or None  # opcional: ex. "DI1N29"
+
+
+def _escolher_di_por_ticker_ou_prazo(
+    df: pd.DataFrame,
+    ticker_preferido: Optional[str],
+    anos_alvo: float,
+    tolerancia: float = 0.75,
+) -> Tuple[Optional[str], Optional[float], Optional[float]]:
+    """
+    Tenta escolher o DI pelo ticker (ex.: DI1N29). Se não existir no snapshot do dia,
+    cai para a regra antiga por prazo (~anos_alvo).
+    Retorna (ticker, taxa, delta_pp) no mesmo formato de _escolher_di_por_prazo.
+    """
+    if df is None or df.empty:
+        return None, None, None
+
+    if ticker_preferido and "ticker" in df.columns:
+        df_tk = df[df["ticker"] == ticker_preferido]
+        if not df_tk.empty:
+            linha = df_tk.iloc[0]
+            taxa_raw = linha.get("taxa")
+            try:
+                taxa = float(taxa_raw) if pd.notnull(taxa_raw) else None
+            except Exception:
+                taxa = None
+
+            variacao_bps_raw = linha.get("variacao_bps")
+            if variacao_bps_raw is None or (hasattr(pd, "isna") and pd.isna(variacao_bps_raw)):
+                delta_pp = None
+            else:
+                try:
+                    delta_pp = float(variacao_bps_raw) / 100.0
+                except Exception:
+                    delta_pp = None
+
+            return ticker_preferido, taxa, delta_pp
+
+    # fallback: regra por prazo
+    return _escolher_di_por_prazo(df, anos_alvo=anos_alvo, tolerancia=tolerancia)
+
+
 def _carregar_di_futuro_2e5_anos() -> Tuple[
     Optional[str],
     Optional[float],
@@ -885,7 +932,7 @@ def _carregar_di_futuro_2e5_anos() -> Tuple[
     # 3) Escolhe o contrato mais próximo de 2 anos e de 5 anos
     #    usando apenas esse último dia (df_ult)
     ticker_di2, di_2_taxa, _ = _escolher_di_por_prazo(df_ult, anos_alvo=2.0)
-    ticker_di5, di_5_taxa, _ = _escolher_di_por_prazo(df_ult, anos_alvo=5.0)
+    ticker_di5, di_5_taxa, _ = _escolher_di_por_ticker_ou_prazo(df_ult, DI_FUTURO_5Y_TICKER, anos_alvo=5.0)
 
     # 4) Calcula delta vs D-1 usando o próprio histórico
     if ticker_di2 is not None and di_2_taxa is not None:
