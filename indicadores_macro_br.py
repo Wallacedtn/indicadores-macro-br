@@ -6,6 +6,7 @@ import streamlit_shadcn_ui as ui
 import altair as alt
 import requests
 import pandas as pd
+import numpy as np
 import unicodedata
 from datetime import datetime, date, timedelta
 from datetime import timedelta as _td
@@ -207,7 +208,9 @@ IPCA_MENSAL_CSV = DATA_PRECOS_DIR / "ipca_mensal_ibge.csv"
 DATA_ATIVIDADE_DIR = DATA_DIR / "atividade"
 NUCI_CSV = DATA_ATIVIDADE_DIR / "nuci_capacidade.csv"
 IBC_BR_CSV = DATA_ATIVIDADE_DIR / "ibcbr.csv"
-PIM_PF_CSV = DATA_ATIVIDADE_DIR / "pim_pf.csv"
+
+# IBGE (CSV offline) – Coincidentes de atividade
+PIM_CSV = DATA_ATIVIDADE_DIR / "pim_pf.csv"
 PMS_CSV = DATA_ATIVIDADE_DIR / "pms.csv"
 PMC_CSV = DATA_ATIVIDADE_DIR / "pmc.csv"
 
@@ -280,17 +283,55 @@ def _icon_mes_ref(mes_ref: Optional[str]) -> str:
 
 def _parse_mes_pt_abrev(s: str) -> pd.Timestamp:
     """
-    Converte 'jan/2011' -> 2011-01-01
+    Converte datas mensais comuns para Timestamp (dia=1).
+
+    Aceita:
+      - 'jan/2011', 'jan-2011'
+      - '01/2011', '1/2011'
+      - '2011-01', '2011/01'
+      - '2011-01-01' (ou qualquer ISO parseável)
     """
     s = str(s).strip().lower()
-    # aceita 'jan/2011' ou 'jan-2011'
-    s = s.replace("-", "/")
-    mm = {"jan":1,"fev":2,"mar":3,"abr":4,"mai":5,"jun":6,"jul":7,"ago":8,"set":9,"out":10,"nov":11,"dez":12}
+
+    # tenta formatos ISO / parseáveis pelo pandas (ex.: 2011-01-01)
     try:
-        m = mm.get(s[:3])
-        y = int(s[-4:])
+        dt = pd.to_datetime(s, errors="raise", dayfirst=False)
+        if pd.notna(dt):
+            return pd.Timestamp(year=int(dt.year), month=int(dt.month), day=1)
+    except Exception:
+        pass
+
+    # normaliza separadores
+    s2 = s.replace(".", "/").replace("-", "/")
+
+    # 01/2011
+    m1 = re.match(r"^(\d{1,2})\/(\d{4})$", s2)
+    if m1:
+        mm = int(m1.group(1))
+        yy = int(m1.group(2))
+        if 1 <= mm <= 12:
+            return pd.Timestamp(year=yy, month=mm, day=1)
+        return pd.NaT
+
+    # 2011/01
+    m2 = re.match(r"^(\d{4})\/(\d{1,2})$", s2)
+    if m2:
+        yy = int(m2.group(1))
+        mm = int(m2.group(2))
+        if 1 <= mm <= 12:
+            return pd.Timestamp(year=yy, month=mm, day=1)
+        return pd.NaT
+
+    # jan/2011
+    mm_map = {"jan":1,"fev":2,"mar":3,"abr":4,"mai":5,"jun":6,"jul":7,"ago":8,"set":9,"out":10,"nov":11,"dez":12}
+    try:
+        m = mm_map.get(s2[:3])
+        y = int(s2[-4:])
         if not m:
             return pd.NaT
+        return pd.Timestamp(year=y, month=m, day=1)
+    except Exception:
+        return pd.NaT
         return pd.Timestamp(year=y, month=m, day=1)
     except Exception:
         return pd.NaT
@@ -314,10 +355,6 @@ def carregar_nuci_csv() -> pd.DataFrame:
     df.columns = ["periodo", "valor"]
 
     df["data"] = df["periodo"].apply(_parse_mes_pt_abrev)
-    # aceita também formato mm/aaaa (ex.: 01/2001)
-    mask_na = df["data"].isna()
-    if mask_na.any():
-        df.loc[mask_na, "data"] = pd.to_datetime(df.loc[mask_na, "periodo"].astype(str).str.strip(), format="%m/%Y", errors="coerce")
     df["valor"] = pd.to_numeric(df["valor"].astype(str).str.replace(",", "."), errors="coerce")
     df = df.dropna(subset=["data", "valor"]).sort_values("data").reset_index(drop=True)
     return df[["data", "valor"]]
@@ -351,6 +388,265 @@ def resumo_nuci() -> dict:
 
 
 @lru_cache(maxsize=32)
+# =============================================================================
+# ATIVIDADE (COINCIDENTES) – ENRIQUECIMENTO “GESTOR-LIKE” (CSV OFFLINE)
+# =============================================================================
+
+def _carregar_csv_ibge_atividade(path_csv: Path) -> pd.DataFrame:
+    """Lê CSV de atividade IBGE no padrão: data,var_mom,acum_ano,acum_12m."""
+    if (not path_csv.exists()) or path_csv.stat().st_size == 0:
+        return pd.DataFrame(columns=["data", "var_mom", "acum_ano", "acum_12m"])
+
+    df = pd.read_csv(path_csv)
+    # normaliza colunas
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    # aceita variações de nome
+    col_data = "data" if "data" in df.columns else df.columns[0]
+    col_mom = "var_mom" if "var_mom" in df.columns else ("var" if "var" in df.columns else None)
+    if col_mom is None:
+        # tenta achar coluna de variação mensal
+        cand = [c for c in df.columns if "mom" in c or "mens" in c]
+        col_mom = cand[0] if cand else None
+
+    col_ytd = "acum_ano" if "acum_ano" in df.columns else None
+    col_12m = "acum_12m" if "acum_12m" in df.columns else None
+
+    keep = [c for c in [col_data, col_mom, col_ytd, col_12m] if c is not None]
+    df = df[keep].copy()
+    df.rename(columns={col_data: "data"}, inplace=True)
+    if col_mom:
+        df.rename(columns={col_mom: "var_mom"}, inplace=True)
+    if col_ytd:
+        df.rename(columns={col_ytd: "acum_ano"}, inplace=True)
+    if col_12m:
+        df.rename(columns={col_12m: "acum_12m"}, inplace=True)
+
+    df["data"] = pd.to_datetime(df["data"], errors="coerce")
+    for c in ["var_mom", "acum_ano", "acum_12m"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        else:
+            df[c] = np.nan
+
+    df = df.dropna(subset=["data"]).sort_values("data").reset_index(drop=True)
+    return df
+
+
+def _indice_sintetico_base_2022(df: pd.DataFrame) -> pd.DataFrame:
+    """Gera um índice sintético (base 2022-01 = 100) a partir de var_mom (%)."""
+    if df.empty or "var_mom" not in df.columns:
+        return pd.DataFrame(columns=["data", "indice", "var_mom", "acum_ano", "acum_12m"])
+
+    d = df.copy()
+    d = d.dropna(subset=["data"]).sort_values("data").reset_index(drop=True)
+
+    # corta em 2022+ para ficar alinhado ao seu racional (quartil 2022+)
+    d = d[d["data"] >= pd.Timestamp("2022-01-01")].copy()
+    if d.empty:
+        return pd.DataFrame(columns=["data", "indice", "var_mom", "acum_ano", "acum_12m"])
+
+    d["indice"] = (1.0 + (d["var_mom"].fillna(0.0) / 100.0)).cumprod() * 100.0
+    return d
+
+
+def _percentil_22plus(val: float, serie_22: pd.Series) -> float | None:
+    """Percentil (0..100) do valor vs distribuição 2022+ (maior = mais forte)."""
+    try:
+        s = pd.to_numeric(serie_22, errors="coerce").dropna()
+        if s.empty or val is None or (pd.isna(val)):
+            return None
+        # rank percentil: fração <= val
+        return float((s <= float(val)).mean() * 100.0)
+    except Exception:
+        return None
+
+
+def _quartil_label_from_pct_top(pct: float | None) -> str:
+    """Converte percentil (0..100) em label onde 1º = TOP 25% (muito forte)."""
+    if pct is None or pd.isna(pct):
+        return "•"
+    if pct >= 75:
+        return "1º quartil (muito forte)"
+    if pct >= 50:
+        return "2º quartil (forte)"
+    if pct >= 25:
+        return "3º quartil (fraco)"
+    return "4º quartil (muito fraco)"
+
+
+def _fmt_pct(x: float | None, digits: int = 2, signed: bool = False) -> str:
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "•"
+    s = f"{x:.{digits}f}%"
+    return ("+" + s) if signed and (x > 0) else s
+
+
+def _fmt_pp(x: float | None, digits: int = 1, signed: bool = False) -> str:
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "•"
+    s = f"{x:.{digits}f} p.p."
+    return ("+" + s) if signed and (x > 0) else s
+
+
+def _fmt_num(x: float | None, digits: int = 1) -> str:
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "•"
+    return f"{x:.{digits}f}"
+
+
+def _delta_serie_pct(df: pd.DataFrame, col_val: str, meses: int) -> float | None:
+    """Δ % (variação relativa) em 'meses' meses: (v_t / v_{t-m} - 1)*100."""
+    if df.empty or col_val not in df.columns:
+        return None
+    d = df.dropna(subset=[col_val]).copy()
+    if len(d) <= meses:
+        return None
+    v_t = float(d.iloc[-1][col_val])
+    v_m = float(d.iloc[-1 - meses][col_val])
+    if v_m == 0:
+        return None
+    return (v_t / v_m - 1.0) * 100.0
+
+
+def _delta_serie_pp(df: pd.DataFrame, col_val: str, meses: int) -> float | None:
+    """Δ em pontos (p.p.) em 'meses' meses: v_t - v_{t-m}."""
+    if df.empty or col_val not in df.columns:
+        return None
+    d = df.dropna(subset=[col_val]).copy()
+    if len(d) <= meses:
+        return None
+    v_t = float(d.iloc[-1][col_val])
+    v_m = float(d.iloc[-1 - meses][col_val])
+    return (v_t - v_m)
+
+
+def _carregar_ibcbr_csv_offline() -> pd.DataFrame:
+    if (not IBC_BR_CSV.exists()) or IBC_BR_CSV.stat().st_size == 0:
+        return pd.DataFrame(columns=["data", "valor"])
+    df = pd.read_csv(IBC_BR_CSV)
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    if "data" not in df.columns:
+        df.rename(columns={df.columns[0]: "data"}, inplace=True)
+    if "valor" not in df.columns:
+        df.rename(columns={df.columns[1]: "valor"}, inplace=True)
+    df["data"] = pd.to_datetime(df["data"], errors="coerce")
+    df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
+    df = df.dropna(subset=["data", "valor"]).sort_values("data").reset_index(drop=True)
+    return df
+
+
+def _resumo_ibcbr_gestor_like() -> dict:
+    """IBC-Br: nível (índice), Δ m/m, Δ 3m, YTD, 12m (tudo em % exceto nível)."""
+    df = _carregar_ibcbr_csv_offline()
+    if df.empty or len(df) < 2:
+        return {"referencia": None, "nivel": None, "mm_pct": None, "d3_pct": None, "ytd_pct": None, "d12_pct": None, "pct22": None}
+
+    df = df.copy()
+    df["data"] = pd.to_datetime(df["data"])
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    nivel = float(last["valor"])
+    mm_pct = (float(last["valor"]) / float(prev["valor"]) - 1.0) * 100.0 if float(prev["valor"]) != 0 else None
+    d3_pct = _delta_serie_pct(df, "valor", 3)
+    d12_pct = _delta_serie_pct(df, "valor", 12)
+
+    # YTD: compara com último dado de dezembro do ano anterior
+    ytd_pct = None
+    try:
+        ano = int(pd.to_datetime(last["data"]).year)
+        ref_dec = df[(df["data"].dt.year == (ano - 1)) & (df["data"].dt.month == 12)]
+        if not ref_dec.empty:
+            v_dec = float(ref_dec.iloc[-1]["valor"])
+            if v_dec != 0:
+                ytd_pct = (nivel / v_dec - 1.0) * 100.0
+    except Exception:
+        ytd_pct = None
+
+    # quartil 2022+: nível
+    df22 = df[df["data"] >= pd.Timestamp("2022-01-01")].copy()
+    pct22 = _percentil_22plus(nivel, df22["valor"]) if not df22.empty else None
+
+    return {
+        "referencia": _formata_mes(pd.to_datetime(last["data"])),
+        "nivel": nivel,
+        "mm_pct": mm_pct,
+        "d3_pct": d3_pct,
+        "ytd_pct": ytd_pct,
+        "d12_pct": d12_pct,
+        "pct22": pct22,
+    }
+
+
+def _resumo_nuci_gestor_like() -> dict:
+    """NUCI: nível (%), Δ m/m, Δ 3m, YTD, 12m (em p.p.)."""
+    df = carregar_nuci_csv()
+    if df.empty or len(df) < 2:
+        return {"referencia": None, "nivel": None, "mm_pp": None, "d3_pp": None, "ytd_pp": None, "d12_pp": None, "pct22": None}
+
+    df = df.copy()
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    nivel = float(last["valor"])
+    mm_pp = float(last["valor"]) - float(prev["valor"])
+    d3_pp = _delta_serie_pp(df, "valor", 3)
+    d12_pp = _delta_serie_pp(df, "valor", 12)
+
+    ytd_pp = None
+    try:
+        ano = int(pd.to_datetime(last["data"]).year)
+        ref_dec = df[(df["data"].dt.year == (ano - 1)) & (df["data"].dt.month == 12)]
+        if not ref_dec.empty:
+            v_dec = float(ref_dec.iloc[-1]["valor"])
+            ytd_pp = (nivel - v_dec)
+    except Exception:
+        ytd_pp = None
+
+    df22 = df[df["data"] >= pd.Timestamp("2022-01-01")].copy()
+    pct22 = _percentil_22plus(nivel, df22["valor"]) if not df22.empty else None
+
+    return {
+        "referencia": _formata_mes(pd.to_datetime(last["data"])),
+        "nivel": nivel,
+        "mm_pp": mm_pp,
+        "d3_pp": d3_pp,
+        "ytd_pp": ytd_pp,
+        "d12_pp": d12_pp,
+        "pct22": pct22,
+    }
+
+
+def _resumo_ibge_gestor_like(nome: str, csv_path: Path) -> dict:
+    """
+    IBGE (PIM/PMS/PMC): usa CSV offline para:
+      - Δ m/m (%): var_mom
+      - No ano (%): acum_ano
+      - 12m (%): acum_12m
+      - Δ 3m (%): via índice sintético base 2022=100
+      - Nível: índice sintético base 2022=100
+      - Quartil 2022+: nível do índice sintético
+    """
+    df = _carregar_csv_ibge_atividade(csv_path)
+    if df.empty:
+        return {"referencia": None, "mm_pct": None, "d3_pct": None, "ytd_pct": None, "d12_pct": None, "nivel": None, "pct22": None}
+
+    # referência do CSV é a última data disponível
+    last_row = df.dropna(subset=["data"]).iloc[-1]
+    ref = _formata_mes(pd.to_datetime(last_row["data"]))
+
+    mm_pct = float(last_row["var_mom"]) if pd.notna(last_row["var_mom"]) else None
+    ytd_pct = float(last_row["acum_ano"]) if pd.notna(last_row["acum_ano"]) else None
+    d12_pct = float(last_row["acum_12m"]) if pd.notna(last_row["acum_12m"]) else None
+
+    # índice sintético 2022+
+    d22 = _indice_sintetico_base_2022(df)
+    nivel = float(d22.iloc[-1]["indice"]) if not d22.empty else None
+    d3_pct = _delta_serie_pct(d22, "indice", 3) if not d22.empty else None
+    pct22 = _percentil_22plus(nivel, d22["indice"]) if (not d22.empty) else None
+
+    return {"referencia": ref, "mm_pct": mm_pct, "d3_pct": d3_pct, "ytd_pct": ytd_pct, "d12_pct": d12_pct, "nivel": nivel, "pct22": pct22}
+
 def _buscar_serie_sgs_cached(
     codigo: int,
     data_inicial: Optional[str],
@@ -841,53 +1137,25 @@ def _resumo_triple_series(
     }
 
 
-def _resumo_3metricas_csv_offline(path: Path) -> Dict[str, Optional[float]]:
-    """Lê CSV do IBGE (gerado por atividade_ibge.py) com colunas:
-    data, var_mom, acum_ano, acum_12m.
-    Retorna no formato usado pelos cards/tabelas: referencia + métricas.
-    Offline-only: se arquivo não existir ou estiver vazio, retorna referência '-'.
-    """
-    if (not path.exists()) or path.stat().st_size == 0:
-        return {"referencia": "-", "var_mensal": None, "acum_ano": None, "acum_12m": None}
-
-    df = pd.read_csv(path)
-    if "data" not in df.columns:
-        return {"referencia": "-", "var_mensal": None, "acum_ano": None, "acum_12m": None}
-
-    df["data"] = pd.to_datetime(df["data"], errors="coerce")
-    for c in ["var_mom", "acum_ano", "acum_12m"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-        else:
-            df[c] = pd.NA
-
-    df = df.dropna(subset=["data"]).sort_values("data").reset_index(drop=True)
-    if df.empty:
-        return {"referencia": "-", "var_mensal": None, "acum_ano": None, "acum_12m": None}
-
-    last = df.iloc[-1]
-    return {
-        "referencia": _formata_mes(pd.to_datetime(last["data"])),
-        "var_mensal": float(last["var_mom"]) if pd.notna(last["var_mom"]) else None,
-        "acum_ano": float(last["acum_ano"]) if pd.notna(last["acum_ano"]) else None,
-        "acum_12m": float(last["acum_12m"]) if pd.notna(last["acum_12m"]) else None,
-    }
+def resumo_pmc_oficial() -> Dict[str, float]:
+    df_mom = buscar_pmc_var_mom_ajustada()
+    df_ano = buscar_pmc_var_acum_ano()
+    df_12 = buscar_pmc_var_acum_12m()
+    return _resumo_triple_series(df_mom, df_ano, df_12)
 
 
-
-def resumo_pmc_oficial() -> Dict[str, Optional[float]]:
-    # Offline-first/only: lê o CSV gerado no update diário
-    return _resumo_3metricas_csv_offline(PMC_CSV)
-
-
-def resumo_pms_oficial() -> Dict[str, Optional[float]]:
-    # Offline-first/only: lê o CSV gerado no update diário
-    return _resumo_3metricas_csv_offline(PMS_CSV)
+def resumo_pms_oficial() -> Dict[str, float]:
+    df_mom = buscar_pms_var_mom_ajustada()
+    df_ano = buscar_pms_var_acum_ano()
+    df_12 = buscar_pms_var_acum_12m()
+    return _resumo_triple_series(df_mom, df_ano, df_12)
 
 
-def resumo_pim_oficial() -> Dict[str, Optional[float]]:
-    # Offline-first/only: lê o CSV gerado no update diário
-    return _resumo_3metricas_csv_offline(PIM_PF_CSV)
+def resumo_pim_oficial() -> Dict[str, float]:
+    df_mom = buscar_pim_var_mom_ajustada()
+    df_ano = buscar_pim_var_acum_ano()
+    df_12 = buscar_pim_var_acum_12m()
+    return _resumo_triple_series(df_mom, df_ano, df_12)
 
 
 # =============================================================================
@@ -2753,7 +3021,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                         if pd.notna(r_pmc["acum_12m"])
                         else "-"
                     ),
-                    "Fonte": "IBGE / PMC (CSV offline)",
+                    "Fonte": "IBGE / PMC (SIDRA – Tabela 8880)",
                 }
             )
         else:
@@ -2765,7 +3033,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Var. mensal": "sem dados",
                     "Acum. no ano": "-",
                     "Acum. 12 meses": "-",
-                    "Fonte": "IBGE / PMC (CSV offline)",
+                    "Fonte": "IBGE / PMC (SIDRA – Tabela 8880)",
                 }
             )
     except Exception as e:
@@ -2777,7 +3045,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                 "Var. mensal": f"Erro: {e}",
                 "Acum. no ano": "-",
                 "Acum. 12 meses": "-",
-                "Fonte": "IBGE / PMC (CSV offline)",    
+                "Fonte": "IBGE / PMC (SIDRA – Tabela 8880)",    
             }
         )
 
@@ -2805,7 +3073,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                         if pd.notna(r_pms["acum_12m"])
                         else "-"
                     ),
-                    "Fonte": "IBGE / PMS (CSV offline)",
+                    "Fonte": "IBGE / PMS (SIDRA – Tabela 5906)",
                 }
             )
         else:
@@ -2817,7 +3085,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Var. mensal": "sem dados",
                     "Acum. no ano": "-",
                     "Acum. 12 meses": "-",
-                    "Fonte": "IBGE / PMS (CSV offline)",
+                    "Fonte": "IBGE / PMS (SIDRA – Tabela 5906)",
                 }
             )
     except Exception as e:
@@ -2829,7 +3097,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                 "Var. mensal": f"Erro: {e}",
                 "Acum. no ano": "-",
                 "Acum. 12 meses": "-",
-                "Fonte": "IBGE / PMS (CSV offline)",
+                "Fonte": "IBGE / PMS (SIDRA – Tabela 5906)",
             }
         )
 
@@ -2857,7 +3125,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                         if pd.notna(r_pim["acum_12m"])
                         else "-"
                     ),
-                    "Fonte": "IBGE / PIM-PF (CSV offline)",
+                    "Fonte": "IBGE / PIM-PF (SIDRA – Tabela 8888)",
                 }
             )
         else:
@@ -2869,7 +3137,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Var. mensal": "sem dados",
                     "Acum. no ano": "-",
                     "Acum. 12 meses": "-",
-                    "Fonte": "IBGE / PIM-PF (CSV offline)",
+                    "Fonte": "IBGE / PIM-PF (SIDRA – Tabela 8888)",
                 }
             )
     except Exception as e:
@@ -2881,73 +3149,35 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                 "Var. mensal": f"Erro: {e}",
                 "Acum. no ano": "-",
                 "Acum. 12 meses": "-",
-                "Fonte": "IBGE / PIM-PF (CSV offline)",
+                "Fonte": "IBGE / PIM-PF (SIDRA – Tabela 8888)",
             }
         )
 
-    # NUCI (Capacidade Instalada) – COINCIDENTE
+# NUCI (Capacidade Instalada) – COINCIDENTE
     try:
-        df_nuci = carregar_nuci_csv()
+        df_nuci = carregar_nuci_csv()  # já existe no seu arquivo
         if df_nuci is not None and not df_nuci.empty:
-            df_nuci = (
-                df_nuci.dropna(subset=["data", "valor"])
-                    .sort_values("data")
-                    .reset_index(drop=True)
-            )
-
-            last_date = pd.Timestamp(df_nuci["data"].iloc[-1])
+            df_nuci = df_nuci.sort_values("data")
             v_last = float(df_nuci["valor"].iloc[-1])
-            ref = last_date.strftime("%m/%Y")
+            ref = df_nuci["data"].iloc[-1].strftime("%m/%Y")
 
-            # ---------- helpers de formatação ----------
-            def _fmt_pp(v):
-                if v is None or (isinstance(v, float) and pd.isna(v)):
-                    return "•"
-                sinal = "+" if v > 0 else ""
-                return f"{sinal}{v:.1f} p.p.".replace(".", ",")
-
-            def _fmt_pct(v):
-                if v is None or (isinstance(v, float) and pd.isna(v)):
-                    return "•"
-                return f"{v:.1f}%".replace(".", ",")
-
-            # ---------- Δ m/m (p.p.) ----------
-            delta_mom = None
+            # variação m/m em p.p.
             if len(df_nuci) >= 2:
                 v_prev = float(df_nuci["valor"].iloc[-2])
-                delta_mom = v_last - v_prev
-
-            # ---------- YTD (p.p.) ----------
-            # base = último dado do ano anterior; fallback: 1º dado do ano corrente
-            ano = last_date.year
-            base_ytd = None
-
-            df_prev_year = df_nuci[df_nuci["data"].dt.year < ano]
-            if not df_prev_year.empty:
-                base_ytd = float(df_prev_year["valor"].iloc[-1])
+                delta_pp = v_last - v_prev
+                delta_txt = f"{delta_pp:+.1f} p.p."
             else:
-                df_year = df_nuci[df_nuci["data"].dt.year == ano]
-                if not df_year.empty:
-                    base_ytd = float(df_year["valor"].iloc[0])
-
-            delta_ytd = (v_last - base_ytd) if base_ytd is not None else None
-
-            # ---------- Δ 12m (p.p.) ----------
-            alvo_12m = last_date - pd.DateOffset(months=12)
-            df_base_12m = df_nuci[df_nuci["data"] <= alvo_12m]
-            base_12m = float(df_base_12m["valor"].iloc[-1]) if not df_base_12m.empty else None
-            delta_12m = (v_last - base_12m) if base_12m is not None else None
+                delta_txt = "•"
 
             linhas.append({
-                "Indicador": f"NUCI – utilização da capacidade (nível: {_fmt_pct(v_last)})",
+                "Indicador": "NUCI – utilização da capacidade",
                 "Classificação": "🟡 Coincidente",
                 "Mês ref.": ref,
-                "Var. mensal": _fmt_pp(delta_mom),     # p.p.
-                "Acum. no ano": _fmt_pp(delta_ytd),    # p.p.
-                "Acum. 12 meses": _fmt_pp(delta_12m),  # p.p.
+                "Var. mensal": delta_txt,     # não é %, é p.p.
+                "Acum. no ano": "•",
+                "Acum. 12 meses": f"{v_last:.1f}%",
                 "Fonte": "CNI (NUCI) – via CSV local",
             })
-
     except Exception as e:
         linhas.append({
             "Indicador": "NUCI – utilização da capacidade",
@@ -2958,7 +3188,6 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
             "Acum. 12 meses": "-",
             "Fonte": "CNI (NUCI) – via CSV local",
         })
-
 
 
 
@@ -3000,11 +3229,12 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
             linhas.append(
                 {
                     "Indicador": "IBC-Br (BCB) – índice",
+                    "Mês ref": _formata_mes(pd.to_datetime(last["data"])),
+                    "Nível": round(float(last["valor"]), 2),
+                    "Var. mensal": round(var_mensal, 2),
+                    "Acum. ano": round(acum_ano, 2),
+                    "Acum. 12m": round(acum_12m, 2),
                     "Classificação": "🟡 Coincidente",
-                    "Mês ref.": _formata_mes(pd.to_datetime(last["data"])),
-                    "Var. mensal": f"{var_mensal:.2f}%" if pd.notna(var_mensal) else "-",
-                    "Acum. no ano": f"{acum_ano:.2f}%" if pd.notna(acum_ano) else "-",
-                    "Acum. 12 meses": f"{acum_12m:.2f}%" if pd.notna(acum_12m) else "-",
                     "Fonte": "BCB (CSV offline)",
                 }
             )
@@ -4932,14 +5162,17 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
             st.markdown(html_table, unsafe_allow_html=True)
 
 
-        def _fmt_pct(x):
+        def _fmt_pct(x, digits=1, signed=False):
             if x is None:
                 return "•"
             try:
                 v = float(x)
             except Exception:
                 return "•"
-            return f"{v:.0f}%"
+
+            s = f"{v:+.{digits}f}" if signed else f"{v:.{digits}f}"
+            return f"{s.replace('.', ',')}%"
+
 
         def _fgv_percentil_22plus(sigla: str):
             """
@@ -5320,250 +5553,136 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
             _render_table_html(df_ant_view)
 
 
+        
         # -----------------------------
         # 2) COINCIDENTES (Atividade – IBGE/BCB/CNI) — “gestor-like”
-        #    Ideia:
-        #    - manter Δ m/m, YTD e 12m
-        #    - adicionar Δ 3m (composto) + Quartil (2022+) com tooltip explicando a base
-        #    - separar “Nível” (para séries em nível: IBC-Br e NUCI)
+        #
+        # Ideia:
+        # - Separar claramente *nível* (estado do ciclo) de *momentum* (direção).
+        # - Quartil (2022+) é calculado sobre o **nível** da série (ou índice sintético base 2022=100, no caso IBGE).
+        # - Δ m/m / Δ 3m / YTD / 12m ficam como “momentum”.
+        #
+        # Obs.: Para IBGE (PIM/PMS/PMC), o “Nível” é um índice sintético base 2022-01=100 (derivado de var_mom),
+        #       para permitir comparação rápida com a média 2022+ sem depender de um índice oficial no CSV.
         # -----------------------------
-        def _pct_below(series: pd.Series, current: float) -> float:
-            s = pd.to_numeric(series, errors="coerce").dropna()
-            if s.empty:
-                return float("nan")
-            return float((s <= current).mean() * 100.0)
-
-        def _fmt_num(x: float, nd: int = 1) -> str:
-            try:
-                if x is None or (isinstance(x, float) and math.isnan(x)):
-                    return "•"
-                return f"{x:.{nd}f}".replace(".", ",")
-            except Exception:
-                return "•"
-
-        def _fmt_pct(x: float, nd: int = 2) -> str:
-            try:
-                if x is None or (isinstance(x, float) and math.isnan(x)):
-                    return "•"
-                return f"{x:.{nd}f}%".replace(".", ",")
-            except Exception:
-                return "•"
-
-        def _fmt_pp(x: float, nd: int = 1) -> str:
-            try:
-                if x is None or (isinstance(x, float) and math.isnan(x)):
-                    return "•"
-                return f"{x:+.{nd}f} p.p.".replace(".", ",")
-            except Exception:
-                return "•"
-
-        def _with_tooltip_custom(label: str, tooltip: str) -> str:
-            tip = html.escape(str(tooltip)).replace("\n", "&#10;")
-            lab = html.escape(str(label))
-            return (
-                f"<span class='fgv-ind' title='{tip}'>{lab}</span>"
-                f"<span class='fgv-info' title='{tip}'>ⓘ</span>"
-            )
-
-        def _read_csv_cached(path: Path, *, kind: str) -> pd.DataFrame:
-            cache = getattr(_read_csv_cached, "_cache", {})
-            key = (str(path), kind)
-            if key in cache:
-                return cache[key].copy()
-
-            if kind == "ibge":
-                df = pd.read_csv(path)
-                df["data"] = pd.to_datetime(df["data"])
-                df = df.sort_values("data")
-            elif kind == "ibc":
-                df = pd.read_csv(path)
-                df["data"] = pd.to_datetime(df["data"])
-                df = df.sort_values("data")
-            elif kind == "nuci":
-                # CSV da CNI costuma vir com ; e decimal com vírgula
-                df = pd.read_csv(path, sep=";", encoding="latin1")
-                c_data = df.columns[0]
-                c_val = df.columns[1]
-                df = df.rename(columns={c_data: "data_raw", c_val: "valor_raw"}).copy()
-                df["data"] = pd.to_datetime(df["data_raw"].astype(str).str.strip(), format="%m/%Y", errors="coerce")
-                df["valor"] = pd.to_numeric(df["valor_raw"].astype(str).str.replace(",", "."), errors="coerce")
-                df = df.dropna(subset=["data", "valor"]).sort_values("data")
-            else:
-                df = pd.read_csv(path)
-
-            cache[key] = df.copy()
-            setattr(_read_csv_cached, "_cache", cache)
-            return df.copy()
-
-        def _mom3_composto_pct(df_ibge: pd.DataFrame) -> float:
-            d = df_ibge.copy()
-            d = d.sort_values("data")
-            # compõe (1+m1)*(1+m2)*(1+m3)-1
-            d["mom3"] = (
-                (1.0 + pd.to_numeric(d["var_mom"], errors="coerce") / 100.0)
-                .rolling(3)
-                .apply(lambda x: float(math.prod(x)), raw=True)
-                - 1.0
-            ) * 100.0
-            return float(d["mom3"].iloc[-1])
-
-        def _mom3_pct_ibc(df_ibc: pd.DataFrame) -> float:
-            d = df_ibc.copy()
-            d = d.sort_values("data")
-            d["mom3"] = (d["valor"] / d["valor"].shift(3) - 1.0) * 100.0
-            return float(d["mom3"].iloc[-1])
-
-        def _delta3m_pp_nuci(df_nuci: pd.DataFrame) -> float:
-            d = df_nuci.copy().sort_values("data")
-            d["d3"] = d["valor"] - d["valor"].shift(3)
-            return float(d["d3"].iloc[-1])
-
         if not df_coi.empty:
-            df_coi_view = df_coi.rename(
-                columns={
-                    "Var. mensal": "Δ m/m",
-                    "Acum. 12 meses": "12m",
-                    "Acum. no ano": "No ano (YTD)",
-                }
-            )
-            df_coi_view = df_coi_view[["Indicador", "Mês ref.", "Δ m/m", "No ano (YTD)", "12m", "Fonte"]].copy()
 
-            # Base “2022+” para quartis/nível (igual ao conceito da tabela FGV)
-            cut = pd.Timestamp("2022-01-01")
+            # Carrega/resume séries offline (quando disponíveis)
+            nuci = _resumo_nuci_gestor_like()
+            ibc = _resumo_ibcbr_gestor_like()
+            pim = _resumo_ibge_gestor_like("PIM", PIM_CSV)
+            pms = _resumo_ibge_gestor_like("PMS", PMS_CSV)
+            pmc = _resumo_ibge_gestor_like("PMC", PMC_CSV)
 
-            # Pré-carrega séries (CSV offline)
-            try:
-                _df_ibc = _read_csv_cached(IBC_BR_CSV, kind="ibc")
-            except Exception:
-                _df_ibc = pd.DataFrame()
-            try:
-                _df_pim = _read_csv_cached(PIM_PF_CSV, kind="ibge")
-            except Exception:
-                _df_pim = pd.DataFrame()
-            try:
-                _df_pms = _read_csv_cached(PMS_CSV, kind="ibge")
-            except Exception:
-                _df_pms = pd.DataFrame()
-            try:
-                _df_pmc = _read_csv_cached(PMC_CSV, kind="ibge")
-            except Exception:
-                _df_pmc = pd.DataFrame()
-            try:
-                _df_nuci = _read_csv_cached(NUCI_CSV, kind="nuci")
-            except Exception:
-                _df_nuci = pd.DataFrame()
-
-            def _enrich_row(ind_name: str) -> dict:
-                ind = str(ind_name)
-
-                # Defaults
-                out = {
-                    "Δ 3m": "•",
-                    "Quartil (2022+)": "•",
-                    "Nível": "•",
-                    "_tooltip": "",
-                    "_base": "",
+            def _row(indicador: str, ref: str, mm: str, d3: str, ytd: str, d12: str, quartil: str, nivel: str, fonte: str) -> dict:
+                return {
+                    "Indicador": indicador,
+                    "Mês ref.": ref or "•",
+                    "Δ m/m": mm,
+                    "Δ 3m": d3,
+                    "No ano (YTD)": ytd,
+                    "12m": d12,
+                    "Quartil (2022+)": quartil,
+                    "Nível": nivel,
+                    "Fonte": fonte,
                 }
 
-                # --- IBC-Br (nível)
-                if "IBC-Br" in ind:
-                    if not _df_ibc.empty:
-                        s = _df_ibc.loc[_df_ibc["data"] >= cut, "valor"].dropna()
-                        cur = float(_df_ibc["valor"].iloc[-1])
-                        pct = _pct_below(s, cur)
-                        out["Nível"] = _fmt_num(cur, 1)
-                        out["Δ 3m"] = _fmt_pct(_mom3_pct_ibc(_df_ibc), 2)
-                        out["Quartil (2022+)"] = _quartil_forca_from_pct(pct)
-                        out["_base"] = "Quartil baseado no **nível** (janela 2022+)."
-                        out["_tooltip"] = (
-                            "IBC‑Br (BCB) — índice (SA)\n"
-                            f"Janela 2022+: n={len(s)}\n"
-                            f"Nível atual: {out['Nível']} | Média: {_fmt_num(float(s.mean()),1)} | "
-                            f"Mín: {_fmt_num(float(s.min()),1)} | Máx: {_fmt_num(float(s.max()),1)}\n"
-                            f"{out['_base']}\n"
-                            "Obs.: Δ m/m, YTD, 12m e Δ 3m são variações % do índice."
-                        )
-                    return out
+            rows = []
 
-                # --- NUCI (nível em %; variações em p.p.)
-                if "NUCI" in ind or "capacidade" in ind.lower():
-                    if not _df_nuci.empty:
-                        s = _df_nuci.loc[_df_nuci["data"] >= cut, "valor"].dropna()
-                        cur = float(_df_nuci["valor"].iloc[-1])
-                        pct = _pct_below(s, cur)
-                        out["Nível"] = _fmt_pct(cur, 1)
-                        out["Δ 3m"] = _fmt_pp(_delta3m_pp_nuci(_df_nuci), 1)
-                        out["Quartil (2022+)"] = _quartil_forca_from_pct(pct)
-                        out["_base"] = "Quartil baseado no **nível** (janela 2022+)."
-                        out["_tooltip"] = (
-                            "NUCI (CNI) — utilização da capacidade (SA)\n"
-                            f"Janela 2022+: n={len(s)}\n"
-                            f"Nível atual: {out['Nível']} | Média: {_fmt_pct(float(s.mean()),1)} | "
-                            f"Mín: {_fmt_pct(float(s.min()),1)} | Máx: {_fmt_pct(float(s.max()),1)}\n"
-                            f"{out['_base']}\n"
-                            "Obs.: Δ m/m, Δ 3m, YTD e 12m são em p.p."
-                        )
-                    return out
-
-                # --- IBGE (PIM/PMS/PMC): quartil por momentum 3m (composto)
-                def _ibge_tooltip(titulo: str, df_ibge: pd.DataFrame) -> dict:
-                    if df_ibge.empty:
-                        return out
-                    d = df_ibge.copy().sort_values("data")
-                    d["mom3"] = (
-                        (1.0 + pd.to_numeric(d["var_mom"], errors="coerce") / 100.0)
-                        .rolling(3)
-                        .apply(lambda x: float(math.prod(x)), raw=True)
-                        - 1.0
-                    ) * 100.0
-                    s = d.loc[d["data"] >= cut, "mom3"].dropna()
-                    cur = float(d["mom3"].iloc[-1])
-                    pct = _pct_below(s, cur)
-                    out["Δ 3m"] = _fmt_pct(cur, 2)
-                    out["Quartil (2022+)"] = _quartil_forca_from_pct(pct)
-                    out["_base"] = "Quartil baseado no **Δ 3m composto** (janela 2022+)."
-                    out["_tooltip"] = (
-                        f"{titulo} (IBGE/SIDRA)\n"
-                        f"Janela 2022+: n={len(s)}\n"
-                        f"Δ 3m atual (composto): {out['Δ 3m']} | Média: {_fmt_pct(float(s.mean()),2)} | "
-                        f"Mín: {_fmt_pct(float(s.min()),2)} | Máx: {_fmt_pct(float(s.max()),2)}\n"
-                        f"{out['_base']}\n"
-                        "Obs.: Δ m/m, YTD e 12m seguem o padrão IBGE (variação/aculumações %)."
+            # NUCI (p.p. + nível %)
+            if nuci.get("referencia"):
+                pct22 = nuci.get("pct22")
+                quartil = _quartil_label_from_pct_top(pct22)
+                # tooltip com média 2022+
+                try:
+                    df_nuci = carregar_nuci_csv()
+                    mu = float(df_nuci[df_nuci["data"] >= pd.Timestamp("2022-01-01")]["valor"].mean())
+                    tip = f"Média 2022+: {mu:.1f}%"
+                except Exception:
+                    tip = "Média 2022+: •"
+                indicador = f'NUCI – utilização da capacidade <span title="{tip}">ⓘ</span>'
+                rows.append(
+                    _row(
+                        indicador=indicador,
+                        ref=nuci.get("referencia"),
+                        mm=_fmt_pp(nuci.get("mm_pp"), digits=1, signed=True),
+                        d3=_fmt_pp(nuci.get("d3_pp"), digits=1, signed=True),
+                        ytd=_fmt_pp(nuci.get("ytd_pp"), digits=1, signed=True),
+                        d12=_fmt_pp(nuci.get("d12_pp"), digits=1, signed=True),
+                        quartil=quartil,
+                        nivel=f'{_fmt_num(nuci.get("nivel"), digits=1)}%',
+                        fonte="CNI (NUCI) – via CSV local",
                     )
-                    return out
+                )
 
-                if "PIM-PF" in ind or "Indústria" in ind:
-                    return _ibge_tooltip("Indústria (PIM‑PF) — produção física", _df_pim)
-                if "PMS" in ind or "Serviços" in ind:
-                    return _ibge_tooltip("Serviços (PMS) — volume", _df_pms)
-                if "PMC" in ind or "Varejo" in ind:
-                    return _ibge_tooltip("Varejo (PMC) — volume", _df_pmc)
+            # IBC-Br (nível índice + variações %)
+            if ibc.get("referencia"):
+                pct22 = ibc.get("pct22")
+                quartil = _quartil_label_from_pct_top(pct22)
+                try:
+                    df_ibc = _carregar_ibcbr_csv_offline()
+                    mu = float(df_ibc[df_ibc["data"] >= pd.Timestamp("2022-01-01")]["valor"].mean())
+                    tip = f"Média 2022+: {mu:.1f}"
+                except Exception:
+                    tip = "Média 2022+: •"
+                indicador = f'IBC-Br (BCB) – índice <span title="{tip}">ⓘ</span>'
+                rows.append(
+                    _row(
+                        indicador=indicador,
+                        ref=ibc.get("referencia"),
+                        mm=_fmt_pct(ibc.get("mm_pct"), digits=2, signed=False),
+                        d3=_fmt_pct(ibc.get("d3_pct"), digits=2, signed=False),
+                        ytd=_fmt_pct(ibc.get("ytd_pct"), digits=2, signed=False),
+                        d12=_fmt_pct(ibc.get("d12_pct"), digits=2, signed=False),
+                        quartil=quartil,
+                        nivel=_fmt_num(ibc.get("nivel"), digits=1),
+                        fonte="BCB (CSV offline)",
+                    )
+                )
 
-                return out
+            # IBGE (índice sintético base 2022=100)
+            def _ibge_row(nome: str, r: dict, fonte: str) -> None:
+                if not r.get("referencia"):
+                    return
+                quartil = _quartil_label_from_pct_top(r.get("pct22"))
+                tip = "Nível = índice sintético (base 2022-01=100) | Quartil calculado sobre o nível (2022+)."
+                indicador = f'{nome} <span title="{tip}">ⓘ</span>'
+                rows.append(
+                    _row(
+                        indicador=indicador,
+                        ref=r.get("referencia"),
+                        mm=_fmt_pct(r.get("mm_pct"), digits=1, signed=False),
+                        d3=_fmt_pct(r.get("d3_pct"), digits=2, signed=False),
+                        ytd=_fmt_pct(r.get("ytd_pct"), digits=1, signed=False),
+                        d12=_fmt_pct(r.get("d12_pct"), digits=1, signed=False),
+                        quartil=quartil,
+                        nivel=_fmt_num(r.get("nivel"), digits=1),
+                        fonte=fonte,
+                    )
+                )
 
-            # aplica enriquecimento + tooltip no “Indicador”
-            extras = df_coi_view["Indicador"].apply(_enrich_row).apply(pd.Series)
-            df_coi_view = pd.concat([df_coi_view, extras[["Δ 3m", "Quartil (2022+)", "Nível", "_tooltip"]]], axis=1)
+            _ibge_row("Indústria (PIM-PF) – produção física", pim, "IBGE / PIM-PF (CSV offline)")
+            _ibge_row("Serviços (PMS) – volume", pms, "IBGE / PMS (CSV offline)")
+            _ibge_row("Varejo (PMC) – volume", pmc, "IBGE / PMC (CSV offline)")
 
-            # limpa “(nível: …)” caso já exista no texto
-            df_coi_view["Indicador"] = df_coi_view["Indicador"].astype(str).str.replace(r"\s*\(nível:.*\)$", "", regex=True)
-            df_coi_view["Indicador"] = [
-                _with_tooltip_custom(lbl, tip) if isinstance(tip, str) and tip.strip() else html.escape(str(lbl))
-                for lbl, tip in zip(df_coi_view["Indicador"], df_coi_view["_tooltip"])
-            ]
-            df_coi_view = df_coi_view.drop(columns=["_tooltip"])
+            df_coi_view = pd.DataFrame(rows)
 
-            # ordena / layout
-            df_coi_view = df_coi_view[
-                ["Indicador", "Mês ref.", "Δ m/m", "Δ 3m", "No ano (YTD)", "12m", "Quartil (2022+)", "Nível", "Fonte"]
-            ].sort_values(["Mês ref.", "Indicador"], ascending=[False, True])
+            # ordena para ficar “leitura de gestor”: primeiro nível (mais alto) e depois indicador
+            if not df_coi_view.empty:
+                # cria auxiliar numérica do nível para ordenar sem perder formatação
+                df_coi_view["_nivel_num"] = (
+                    df_coi_view["Nível"]
+                    .astype(str)
+                    .str.replace("%", "", regex=False)
+                    .str.replace(",", ".", regex=False)
+                    .apply(lambda x: pd.to_numeric(x, errors="coerce"))
+                )
+                df_coi_view = df_coi_view.sort_values(["_nivel_num", "Indicador"], ascending=[False, True]).drop(columns=["_nivel_num"])
 
             st.markdown("**Coincidentes (Atividade – IBGE)**")
-            _render_table_html(df_coi_view)
-
-
-        # -----------------------------
-# 3) DEFASADOS (se você adicionar depois)
+            st.markdown(_render_table_html(df_coi_view), unsafe_allow_html=True)
+# -----------------------------
+        # 3) DEFASADOS (se você adicionar depois)
         # -----------------------------
         if not df_def.empty:
             df_def_view = df_def.rename(
@@ -5574,10 +5693,13 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
                 }
             )
             df_def_view = df_def_view[["Indicador", "Mês ref.", "Δ m/m", "No ano (YTD)", "12m", "Fonte"]].copy()
-            df_def_view = df_def_view.sort_values(["Mês ref.", "Indicador"], ascending=[False, True])
+            df_def_view = df_def_view.sort_values(["Indicador"])
 
             st.markdown("**Defasados**")
-            _render_table_html(df_def_view)
+            df_def_view.index = [""] * len(df_def_view)
+            st.table(df_def_view)
+
+
 
 
 def render_bloco_expectativas_focus(
