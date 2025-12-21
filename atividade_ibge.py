@@ -1,11 +1,14 @@
 # atividade_ibge.py
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from datetime import date
 import pandas as pd
 import requests
 from typing import Optional
+
+logging.basicConfig(level=logging.WARNING)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -66,53 +69,65 @@ def _montar_3_metricas(url_mom: str, url_ytd: str, url_12m: str) -> pd.DataFrame
 
 
 def atualizar_pmc_csv(out_path: Path = PMC_CSV) -> pd.DataFrame:
-    base = "https://apisidra.ibge.gov.br/values/"
-    url_mom = base + "t/8880/n1/all/v/11708/p/last60/c11046/56734/d/v11708%201"
-    url_ytd = base + "t/8880/n1/all/v/11710/p/last60/c11046/56734/d/v11710%201"
-    url_12m = base + "t/8880/n1/all/v/11711/p/last60/c11046/56734/d/v11711%201"
+    try:
+        base = "https://apisidra.ibge.gov.br/values/"
+        url_mom = base + "t/8880/n1/all/v/11708/p/last60/c11046/56734/d/v11708%201"
+        url_ytd = base + "t/8880/n1/all/v/11710/p/last60/c11046/56734/d/v11710%201"
+        url_12m = base + "t/8880/n1/all/v/11711/p/last60/c11046/56734/d/v11711%201"
 
-    df = _montar_3_metricas(url_mom, url_ytd, url_12m)
-    df.to_csv(out_path, index=False, date_format="%Y-%m-%d")
+        df = _montar_3_metricas(url_mom, url_ytd, url_12m)
+        df.to_csv(out_path, index=False, date_format="%Y-%m-%d")
 
-    if df.empty:
-        print(f"[PMC] CSV atualizado (vazio): {out_path} (0 linhas).")
-    else:
-        print(f"[PMC] CSV atualizado: {out_path} ({len(df)} linhas). Último mês: {df['data'].iloc[-1].strftime('%m/%Y')}")
-    return df
+        if df.empty:
+            print(f"[PMC] CSV atualizado (vazio): {out_path} (0 linhas).")
+        else:
+            print(f"[PMC] CSV atualizado: {out_path} ({len(df)} linhas). Último mês: {df['data'].iloc[-1].strftime('%m/%Y')}")
+        return df
+    except Exception as e:
+        logging.error(f"Erro ao atualizar PMC: {e}")
+        raise
 
 
 
 def atualizar_pms_csv(out_path: Path = PMS_CSV) -> pd.DataFrame:
-    base = "https://apisidra.ibge.gov.br/values/"
-    url_mom = base + "t/5906/n1/all/v/11623/p/last60/c11046/56726/d/v11623%201"
-    url_ytd = base + "t/5906/n1/all/v/11625/p/last60/c11046/56726/d/v11625%201"
-    url_12m = base + "t/5906/n1/all/v/11626/p/last60/c11046/56726/d/v11626%201"
+    try:
+        base = "https://apisidra.ibge.gov.br/values/"
+        url_mom = base + "t/5906/n1/all/v/11623/p/last60/c11046/56726/d/v11623%201"
+        url_ytd = base + "t/5906/n1/all/v/11625/p/last60/c11046/56726/d/v11625%201"
+        url_12m = base + "t/5906/n1/all/v/11626/p/last60/c11046/56726/d/v11626%201"
 
-    df = _montar_3_metricas(url_mom, url_ytd, url_12m)
-    df.to_csv(out_path, index=False, date_format="%Y-%m-%d")
+        df = _montar_3_metricas(url_mom, url_ytd, url_12m)
+        df.to_csv(out_path, index=False, date_format="%Y-%m-%d")
 
-    if df.empty:
-        print(f"[PMS] CSV atualizado (vazio): {out_path} (0 linhas).")
-    else:
-        print(f"[PMS] CSV atualizado: {out_path} ({len(df)} linhas). Último mês: {df['data'].iloc[-1].strftime('%m/%Y')}")
-    return df
+        if df.empty:
+            print(f"[PMS] CSV atualizado (vazio): {out_path} (0 linhas).")
+        else:
+            print(f"[PMS] CSV atualizado: {out_path} ({len(df)} linhas). Último mês: {df['data'].iloc[-1].strftime('%m/%Y')}")
+        return df
+    except Exception as e:
+        logging.error(f"Erro ao atualizar PMS: {e}")
+        raise
 
 
 
 def atualizar_pim_csv(out_path: Path = PIM_CSV) -> pd.DataFrame:
-    base = "https://apisidra.ibge.gov.br/values/"
-    url_mom = base + "t/8888/n1/all/v/11601/p/last60/c544/129314/d/v11601%201"
-    url_ytd = base + "t/8888/n1/all/v/11603/p/last60/c544/129314/d/v11603%201"
-    url_12m = base + "t/8888/n1/all/v/11604/p/last60/c544/129314/d/v11604%201"
+    try:
+        base = "https://apisidra.ibge.gov.br/values/"
+        url_mom = base + "t/8888/n1/all/v/11601/p/last60/c544/129314/d/v11601%201"
+        url_ytd = base + "t/8888/n1/all/v/11603/p/last60/c544/129314/d/v11603%201"
+        url_12m = base + "t/8888/n1/all/v/11604/p/last60/c544/129314/d/v11604%201"
 
-    df = _montar_3_metricas(url_mom, url_ytd, url_12m)
-    df.to_csv(out_path, index=False, date_format="%Y-%m-%d")
+        df = _montar_3_metricas(url_mom, url_ytd, url_12m)
+        df.to_csv(out_path, index=False, date_format="%Y-%m-%d")
 
-    if df.empty:
-        print(f"[PIM-PF] CSV atualizado (vazio): {out_path} (0 linhas).")
-    else:
-        print(f"[PIM-PF] CSV atualizado: {out_path} ({len(df)} linhas). Último mês: {df['data'].iloc[-1].strftime('%m/%Y')}")
-    return df
+        if df.empty:
+            print(f"[PIM-PF] CSV atualizado (vazio): {out_path} (0 linhas).")
+        else:
+            print(f"[PIM-PF] CSV atualizado: {out_path} ({len(df)} linhas). Último mês: {df['data'].iloc[-1].strftime('%m/%Y')}")
+        return df
+    except Exception as e:
+        logging.error(f"Erro ao atualizar PIM: {e}")
+        raise
 
 
 

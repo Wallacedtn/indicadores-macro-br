@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import io
+import logging
 from datetime import date
 from functools import lru_cache
 from typing import List, Optional
@@ -11,6 +12,8 @@ from typing import List, Optional
 import pandas as pd
 import requests
 from pathlib import Path
+
+logging.basicConfig(level=logging.WARNING)
 
 # Pasta onde vamos guardar o CSV bruto do Tesouro Direto
 BASE_DIR = Path(__file__).resolve().parent

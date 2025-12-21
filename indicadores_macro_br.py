@@ -643,7 +643,13 @@ def _resumo_ibge_gestor_like(nome: str, csv_path: Path) -> dict:
     d22 = _indice_sintetico_base_2022(df)
     nivel = float(d22.iloc[-1]["indice"]) if not d22.empty else None
     d3_pct = _delta_serie_pct(d22, "indice", 3) if not d22.empty else None
-    pct22 = _percentil_22plus(nivel, d22["indice"]) if (not d22.empty) else None
+    
+    # Quartil baseado em Δ 12m (momentum) em vez de nível
+    df_hist = df[df["data"] >= pd.Timestamp("2022-01-01")].copy()
+    if not df_hist.empty and d12_pct is not None:
+        pct22 = (df_hist["acum_12m"] <= d12_pct).sum() / len(df_hist) * 100
+    else:
+        pct22 = None
 
     return {"referencia": ref, "mm_pct": mm_pct, "d3_pct": d3_pct, "ytd_pct": ytd_pct, "d12_pct": d12_pct, "nivel": nivel, "pct22": pct22}
 
@@ -3196,6 +3202,22 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
     # (1) tenta CSV offline-first em data/atividade/ibcbr.csv
     # (2) se não existir, você pode decidir cair pra SGS ou deixar vazio
     # -------------------------------------------------------------------------
+    def _baixar_serie_sgs_json(codigo: int, n_ultimos: int = 36) -> pd.DataFrame:
+        import requests
+        url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados?formato=json"
+        r = requests.get(url, timeout=60)
+        r.raise_for_status()
+        dados = r.json() or []
+        df = pd.DataFrame(dados)
+        if df.empty:
+            raise RuntimeError(f"Série {codigo}: API retornou vazio.")
+        df["data"] = pd.to_datetime(df["data"], format="%d/%m/%Y", errors="coerce")
+        df["valor"] = pd.to_numeric(df["valor"].astype(str).str.replace(",", "."), errors="coerce")
+        df = df.dropna(subset=["data", "valor"]).sort_values("data").reset_index(drop=True)
+        if n_ultimos > 0:
+            df = df.tail(n_ultimos)
+        return df
+
     def _carregar_ibcbr_offline() -> pd.DataFrame:
         if not IBC_BR_CSV.exists() or IBC_BR_CSV.stat().st_size == 0:
             return pd.DataFrame(columns=["data", "valor"])
@@ -3226,6 +3248,25 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
             v_12m = float(df_ibc.iloc[-13]["valor"])
             acum_12m = (float(last["valor"]) / v_12m - 1) * 100.0
 
+            # variação a/a from NSA series (24363)
+            var_aa = 99.99  # test
+            try:
+                df_nsa = _baixar_serie_sgs_json(24363, n_ultimos=120)
+                df_nsa = df_nsa.sort_values("data").reset_index(drop=True)
+                data_ref = pd.to_datetime(last["data"])
+                # valor atual na série sem ajuste
+                mask_atual = (df_nsa["data"].dt.year == data_ref.year) & (df_nsa["data"].dt.month == data_ref.month)
+                df_atual = df_nsa.loc[mask_atual]
+                # valor do mesmo mês do ano anterior
+                mask_aa = (df_nsa["data"].dt.year == data_ref.year - 1) & (df_nsa["data"].dt.month == data_ref.month)
+                df_aa = df_nsa.loc[mask_aa]
+                if not df_atual.empty and not df_aa.empty:
+                    valor_atual = float(df_atual.iloc[-1]["valor"])
+                    valor_aa = float(df_aa.iloc[-1]["valor"])
+                    var_aa = (valor_atual / valor_aa - 1.0) * 100.0
+            except Exception:
+                pass
+
             linhas.append(
                 {
                     "Indicador": "IBC-Br (BCB) – índice",
@@ -3233,7 +3274,7 @@ def montar_tabela_atividade_economica() -> pd.DataFrame:
                     "Nível": round(float(last["valor"]), 2),
                     "Var. mensal": round(var_mensal, 2),
                     "Acum. ano": round(acum_ano, 2),
-                    "Acum. 12m": round(acum_12m, 2),
+                    "Acum. 12m": round(var_aa, 2),
                     "Classificação": "🟡 Coincidente",
                     "Fonte": "BCB (CSV offline)",
                 }
@@ -5316,6 +5357,14 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
             "ICST": "Índice de Confiança da Construção (humor da construção).",
         }
 
+        _COINCIDENTE_DESC = {
+            "NUCI (CNI)": "NUCI: Nível de Utilização da Capacidade Instalada (CNI). Mede o percentual de uso da capacidade produtiva da indústria brasileira.",
+            "IBC-Br (BCB)": "IBC-Br: Índice de Atividade Econômica do Banco Central. Indicador coincidente que estima a atividade econômica mensal.",
+            "Indústria (PIM-PF) – produção física": "PIM-PF: Pesquisa Industrial Mensal - Produção Física (IBGE). Volume de produção industrial mensal.",
+            "Serviços (PMS) – volume": "PMS: Pesquisa Mensal de Serviços (IBGE). Volume de serviços prestados mensalmente.",
+            "Varejo (PMC) – volume": "PMC: Pesquisa Mensal do Comércio (IBGE). Volume de vendas no varejo mensal.",
+        }
+
         def _with_tooltip_indicador(label: str, sigla: str) -> str:
             """
             Retorna HTML com tooltip (title) + ícone ⓘ visível.
@@ -5345,6 +5394,21 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
             )
 
 
+        def _with_tooltip_indicador_coincidente(label: str) -> str:
+            """
+            Retorna HTML com tooltip para indicadores coincidentes.
+            """
+            desc = _COINCIDENTE_DESC.get(label, "Indicador de atividade econômica coincidente.")
+            tip = f"{label} — {desc}"
+            tip_html = html.escape(tip).replace("\n", "&#10;")
+            label_html = html.escape(str(label))
+
+            return (
+                f"<span class='fgv-ind' title='{tip_html}'>{label_html}</span>"
+                f"<span class='fgv-info' title='{tip_html}'>ⓘ</span>"
+            )
+
+
         def _render_table_html(df: pd.DataFrame):
             """
             Renderiza tabela HTML (permite tooltip por célula).
@@ -5355,6 +5419,8 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
             .fgv_tbl th, .fgv_tbl td { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.08); }
             .fgv_tbl th { font-weight: 600; text-align: left; }
             .fgv_tbl tr:hover td { background: rgba(255,255,255,0.03); }
+            .fgv_tbl tr.quartil-forte { background-color: rgba(0,255,0,0.1); }  /* Verde claro para forte */
+            .fgv_tbl tr.quartil-fraco { background-color: rgba(255,0,0,0.1); }  /* Vermelho claro para fraco */
 
             /* tooltip / ícone */
             .fgv-ind { cursor: help; }
@@ -5371,7 +5437,30 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
             </style>
             """
             st.markdown(css, unsafe_allow_html=True)
-            st.markdown(f"<div class='fgv_tbl'>{df.to_html(index=False, escape=False)}</div>", unsafe_allow_html=True)
+            
+            # Adicionar classe de linha baseada no quartil
+            def _add_row_class(row):
+                quartil = str(row["Quartil (2022+)"])
+                if "1º" in quartil or "2º" in quartil:
+                    return "quartil-forte"
+                elif "3º" in quartil or "4º" in quartil:
+                    return "quartil-fraco"
+                return ""
+            
+            df = df.copy()
+            df["row_class"] = df.apply(_add_row_class, axis=1)
+            
+            # Renderizar HTML com classes
+            html_rows = []
+            for _, row in df.iterrows():
+                row_class = row["row_class"]
+                cells = [f"<td>{cell}</td>" for cell in row.drop("row_class")]
+                html_rows.append(f"<tr class='{row_class}'>{' '.join(cells)}</tr>")
+            
+            headers = [f"<th>{col}</th>" for col in df.columns if col != "row_class"]
+            html_table = f"<table class='dataframe'><thead><tr>{' '.join(headers)}</tr></thead><tbody>{' '.join(html_rows)}</tbody></table>"
+            
+            st.markdown(f"<div class='fgv_tbl'>{html_table}</div>", unsafe_allow_html=True)
 
 
 
@@ -5574,18 +5663,19 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
             pms = _resumo_ibge_gestor_like("PMS", PMS_CSV)
             pmc = _resumo_ibge_gestor_like("PMC", PMC_CSV)
 
-            def _row(indicador: str, ref: str, mm: str, d3: str, ytd: str, d12: str, quartil: str, nivel: str, fonte: str) -> dict:
-                return {
+            def _row(indicador: str, ref: str, mm: str, d3: str, d12: str, quartil: str, fonte: str, nivel: str = None) -> dict:
+                row = {
                     "Indicador": indicador,
                     "Mês ref.": ref or "•",
                     "Δ m/m": mm,
                     "Δ 3m": d3,
-                    "No ano (YTD)": ytd,
-                    "12m": d12,
+                    "Δ 12m": d12,
                     "Quartil (2022+)": quartil,
-                    "Nível": nivel,
                     "Fonte": fonte,
                 }
+                if nivel is not None:
+                    row["Nível"] = nivel
+                return row
 
             rows = []
 
@@ -5600,14 +5690,13 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
                     tip = f"Média 2022+: {mu:.1f}%"
                 except Exception:
                     tip = "Média 2022+: •"
-                indicador = f'NUCI – utilização da capacidade <span title="{tip}">ⓘ</span>'
+                indicador = "NUCI (CNI)"
                 rows.append(
                     _row(
                         indicador=indicador,
                         ref=nuci.get("referencia"),
                         mm=_fmt_pp(nuci.get("mm_pp"), digits=1, signed=True),
                         d3=_fmt_pp(nuci.get("d3_pp"), digits=1, signed=True),
-                        ytd=_fmt_pp(nuci.get("ytd_pp"), digits=1, signed=True),
                         d12=_fmt_pp(nuci.get("d12_pp"), digits=1, signed=True),
                         quartil=quartil,
                         nivel=f'{_fmt_num(nuci.get("nivel"), digits=1)}%',
@@ -5625,14 +5714,13 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
                     tip = f"Média 2022+: {mu:.1f}"
                 except Exception:
                     tip = "Média 2022+: •"
-                indicador = f'IBC-Br (BCB) – índice <span title="{tip}">ⓘ</span>'
+                indicador = "IBC-Br (BCB)"
                 rows.append(
                     _row(
                         indicador=indicador,
                         ref=ibc.get("referencia"),
                         mm=_fmt_pct(ibc.get("mm_pct"), digits=2, signed=False),
                         d3=_fmt_pct(ibc.get("d3_pct"), digits=2, signed=False),
-                        ytd=_fmt_pct(ibc.get("ytd_pct"), digits=2, signed=False),
                         d12=_fmt_pct(ibc.get("d12_pct"), digits=2, signed=False),
                         quartil=quartil,
                         nivel=_fmt_num(ibc.get("nivel"), digits=1),
@@ -5645,18 +5733,15 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
                 if not r.get("referencia"):
                     return
                 quartil = _quartil_label_from_pct_top(r.get("pct22"))
-                tip = "Nível = índice sintético (base 2022-01=100) | Quartil calculado sobre o nível (2022+)."
-                indicador = f'{nome} <span title="{tip}">ⓘ</span>'
+                indicador = nome
                 rows.append(
                     _row(
                         indicador=indicador,
                         ref=r.get("referencia"),
                         mm=_fmt_pct(r.get("mm_pct"), digits=1, signed=False),
                         d3=_fmt_pct(r.get("d3_pct"), digits=2, signed=False),
-                        ytd=_fmt_pct(r.get("ytd_pct"), digits=1, signed=False),
                         d12=_fmt_pct(r.get("d12_pct"), digits=1, signed=False),
                         quartil=quartil,
-                        nivel=_fmt_num(r.get("nivel"), digits=1),
                         fonte=fonte,
                     )
                 )
@@ -5667,21 +5752,20 @@ def render_bloco5_atividade(df_ativ: pd.DataFrame):
 
             df_coi_view = pd.DataFrame(rows)
 
-            # ordena para ficar “leitura de gestor”: primeiro nível (mais alto) e depois indicador
+            # Adiciona tooltip aos indicadores
+            df_coi_view["Indicador"] = df_coi_view["Indicador"].apply(_with_tooltip_indicador_coincidente)
+
+            # ordena para ficar “leitura de gestor”: quartil mais forte primeiro, depois Δ 12m
             if not df_coi_view.empty:
-                # cria auxiliar numérica do nível para ordenar sem perder formatação
-                df_coi_view["_nivel_num"] = (
-                    df_coi_view["Nível"]
-                    .astype(str)
-                    .str.replace("%", "", regex=False)
-                    .str.replace(",", ".", regex=False)
-                    .apply(lambda x: pd.to_numeric(x, errors="coerce"))
-                )
-                df_coi_view = df_coi_view.sort_values(["_nivel_num", "Indicador"], ascending=[False, True]).drop(columns=["_nivel_num"])
+                # Mapeie quartil para numérico (1º = 4, 2º = 3, etc.)
+                quartil_order = {"1º quartil (muito forte)": 4, "2º quartil (forte)": 3, "3º quartil (fraco)": 2, "4º quartil (muito fraco)": 1}
+                df_coi_view["quartil_num"] = df_coi_view["Quartil (2022+)"].map(quartil_order).fillna(0)
+                df_coi_view = df_coi_view.sort_values(["quartil_num", "Δ 12m"], ascending=[False, False]).drop(columns=["quartil_num"])
 
             st.markdown("**Coincidentes (Atividade – IBGE)**")
             st.markdown(_render_table_html(df_coi_view), unsafe_allow_html=True)
-# -----------------------------
+            st.caption("💡 Quartil calculado sobre Δ 12m (2022+) para priorizar direção do ciclo econômico.")
+        # -----------------------------
         # 3) DEFASADOS (se você adicionar depois)
         # -----------------------------
         if not df_def.empty:

@@ -1,12 +1,12 @@
 # curvas_anbima.py
 # -*- coding: utf-8 -*-
 
-import os
 import io
 import re
 from datetime import datetime, timedelta, date
 from typing import Optional, List
 from functools import lru_cache
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -18,8 +18,8 @@ logging.basicConfig(level=logging.WARNING)
 # CONFIGURAÇÃO DE PASTAS / ARQUIVOS
 # =============================================================================
 
-BASE_DIR = "data/curvas_tesouro/curvas_anbima"
-os.makedirs(BASE_DIR, exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parent / "data" / "curvas_tesouro" / "curvas_anbima"
+BASE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Arquivo único com toda a informação de curva:
 # - data_curva: data efetiva da ETTJ (data da curva ANBIMA)
@@ -27,7 +27,7 @@ os.makedirs(BASE_DIR, exist_ok=True)
 # - PRAZO_DU  : prazo em dias úteis
 # - TAXA_PREF : juro nominal (% a.a.)
 # - TAXA_IPCA : juro real (% a.a.)
-PATH_FULL = os.path.join(BASE_DIR, "curvas_anbima_full.csv")
+PATH_FULL = BASE_DIR / "curvas_anbima_full.csv"
 
 
 # =============================================================================
@@ -121,8 +121,8 @@ def _baixar_curva_zero_ultima() -> pd.DataFrame:
 
     # salva resposta crua para eventual debug
     try:
-        os.makedirs(BASE_DIR, exist_ok=True)
-        debug_path = os.path.join(BASE_DIR, "debug_curva_zero_raw.csv")
+        BASE_DIR.mkdir(parents=True, exist_ok=True)
+        debug_path = BASE_DIR / "debug_curva_zero_raw.csv"
         with open(debug_path, "w", encoding="latin-1") as f:
             f.write(texto)
         _log(f"Resposta crua salva em {debug_path}", level="debug")

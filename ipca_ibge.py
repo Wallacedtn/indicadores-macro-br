@@ -105,25 +105,29 @@ def atualizar_ipca_mensal_csv() -> pd.DataFrame:
 
     Esse CSV é o que o indicadores_macro_br.py vai ler no modo offline-first.
     """
-    df = baixar_ipca_mensal_ultimos_anos()
+    try:
+        df = baixar_ipca_mensal_ultimos_anos()
 
-    DATA_PRECOS_DIR.mkdir(parents=True, exist_ok=True)
-    df.to_csv(IPCA_MENSAL_CSV, index=False, encoding="utf-8")
+        DATA_PRECOS_DIR.mkdir(parents=True, exist_ok=True)
+        df.to_csv(IPCA_MENSAL_CSV, index=False, encoding="utf-8")
 
-    logger.info(
-        "CSV do IPCA mensal atualizado: %d linhas em %s",
-        len(df),
-        IPCA_MENSAL_CSV,
-    )
+        logger.info(
+            "CSV do IPCA mensal atualizado: %d linhas em %s",
+            len(df),
+            IPCA_MENSAL_CSV,
+        )
 
-    # logzinho no console pra sanity check
-    ultimo = df.iloc[-1]
-    print(
-        f"Último mês IPCA: {ultimo['data'].strftime('%m/%Y')} | "
-        f"variação: {ultimo['valor']:.2f}%"
-    )
+        # logzinho no console pra sanity check
+        ultimo = df.iloc[-1]
+        print(
+            f"Último mês IPCA: {ultimo['data'].strftime('%m/%Y')} | "
+            f"variação: {ultimo['valor']:.2f}%"
+        )
 
-    return df
+        return df
+    except Exception as e:
+        logger.error(f"Erro ao atualizar IPCA mensal: {e}")
+        raise
 
 
 if __name__ == "__main__":

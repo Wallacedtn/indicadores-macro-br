@@ -1,10 +1,10 @@
 # di_futuro_b3.py
 # -*- coding: utf-8 -*-
 
-import os
 import requests
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
 
 # ============================================================
 # CONFIG BÁSICA
@@ -13,8 +13,9 @@ from datetime import datetime
 API_B3_DI1 = "https://cotacao.b3.com.br/mds/api/v1/DerivativeQuotation/DI1"
 
 # arquivo onde vamos salvar o histórico
-HIST_DIR = "data/curvas_tesouro/di_futuro"
-HIST_PATH = os.path.join(HIST_DIR, "di1_historico.csv")
+HIST_DIR = Path(__file__).resolve().parent / "data" / "curvas_tesouro" / "di_futuro"
+HIST_DIR.mkdir(parents=True, exist_ok=True)
+HIST_PATH = HIST_DIR / "di1_historico.csv"
 
 # cabeçalhos para imitar um navegador
 HEADERS = {
@@ -156,7 +157,7 @@ def baixar_snapshot_di_futuro() -> pd.DataFrame:
 # ATUALIZAR HISTÓRICO EM CSV
 # ============================================================
 
-def atualizar_historico_di_futuro(caminho: str = HIST_PATH) -> pd.DataFrame:
+def atualizar_historico_di_futuro(caminho: Path = HIST_PATH) -> pd.DataFrame:
     """
     Atualiza o arquivo di1_historico.csv com o snapshot diário da B3.
 
@@ -168,11 +169,11 @@ def atualizar_historico_di_futuro(caminho: str = HIST_PATH) -> pd.DataFrame:
     df_novo = baixar_snapshot_di_futuro()
 
     # Garante que a pasta existe
-    os.makedirs(os.path.dirname(caminho), exist_ok=True)
+    caminho.parent.mkdir(parents=True, exist_ok=True)
 
     # Se não veio nada da B3 -> devolve histórico antigo ou DF vazio
     if df_novo is None or df_novo.empty:
-        if os.path.exists(caminho) and os.path.getsize(caminho) > 0:
+        if caminho.exists() and caminho.stat().st_size > 0:
             df_old = pd.read_csv(caminho, parse_dates=["data"])
             df_old["data"] = df_old["data"].dt.date
             return df_old
@@ -185,7 +186,7 @@ def atualizar_historico_di_futuro(caminho: str = HIST_PATH) -> pd.DataFrame:
         return pd.DataFrame(columns=colunas)
 
     # Carrega histórico antigo (se existir)
-    if os.path.exists(caminho) and os.path.getsize(caminho) > 0:
+    if caminho.exists() and caminho.stat().st_size > 0:
         df_old = pd.read_csv(caminho, parse_dates=["data"])
         df_old["data"] = df_old["data"].dt.date
     else:
@@ -230,8 +231,8 @@ def atualizar_historico_di_futuro(caminho: str = HIST_PATH) -> pd.DataFrame:
 # CARREGAR HISTÓRICO
 # ============================================================
 
-def carregar_historico_di_futuro(caminho: str = HIST_PATH) -> pd.DataFrame:
-    if not os.path.exists(caminho):
+def carregar_historico_di_futuro(caminho: Path = HIST_PATH) -> pd.DataFrame:
+    if not caminho.exists():
         raise FileNotFoundError(f"Arquivo histórico não encontrado: {caminho}")
     df = pd.read_csv(caminho, parse_dates=["data"])
     df["data"] = df["data"].dt.date

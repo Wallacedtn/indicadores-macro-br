@@ -11,6 +11,9 @@ from typing import Optional, Tuple
 import pandas as pd
 import requests
 import urllib3
+import logging
+
+logging.basicConfig(level=logging.WARNING)
 
 # O IPEA está com problema de certificado SSL.
 # Esta linha desativa o aviso de "InsecureRequestWarning"
@@ -25,8 +28,9 @@ IPEA_BASE_URL = "https://www.ipeadata.gov.br/api/odata4"
 IBOV_SERCODIGO = "GM366_IBVSP366"
 
 # Pasta / arquivo onde vamos salvar o histórico local
-HIST_DIR = "data/curto_prazo"
-HIST_PATH = os.path.join(HIST_DIR, "ibovespa_ipea.csv")
+BASE_DIR = Path(__file__).parent
+HIST_DIR = BASE_DIR / "data" / "curto_prazo"
+HIST_PATH = HIST_DIR / "ibovespa_ipea.csv"
 
 
 def baixar_serie_ibovespa(
@@ -49,7 +53,7 @@ def baixar_serie_ibovespa(
 
     for tentativa in range(1, tentativas + 1):
         try:
-            print(
+            logging.info(
                 f"[Ibovespa IPEA] Tentativa {tentativa}/{tentativas} "
                 f"(timeout={timeout})..."
             )
@@ -88,17 +92,17 @@ def baixar_serie_ibovespa(
         ) as e:
             # Erros de timeout / conexão: tenta de novo
             ultima_exc = e
-            print(
+            logging.error(
                 f"[Ibovespa IPEA] Falha de rede (tentativa "
                 f"{tentativa}/{tentativas}): {e}"
             )
             if tentativa == tentativas:
-                print("[Ibovespa IPEA] Todas as tentativas falharam.")
+                logging.error("[Ibovespa IPEA] Todas as tentativas falharam.")
                 raise
 
         except requests.exceptions.RequestException as e:
             # Erros HTTP 4xx/5xx ou outros problemas de request
-            print(f"[Ibovespa IPEA] Erro na requisição: {e}")
+            logging.error(f"[Ibovespa IPEA] Erro na requisição: {e}")
             raise
 
     # Segurança: se chegar aqui sem retorno
@@ -115,50 +119,54 @@ def atualizar_historico_ibovespa(caminho: str = HIST_PATH) -> pd.DataFrame:
     - Se existir, concatena e remove duplicatas por data.
     - Retorna o DataFrame final ordenado por data.
     """
-    df_novo = baixar_serie_ibovespa()
+    try:
+        df_novo = baixar_serie_ibovespa()
 
-    # Garante que a pasta existe
-    os.makedirs(os.path.dirname(caminho), exist_ok=True)
+        # Garante que a pasta existe
+        caminho.parent.mkdir(parents=True, exist_ok=True)
 
-    # Carrega histórico antigo (se existir)
-    if os.path.exists(caminho) and os.path.getsize(caminho) > 0:
-        df_old = pd.read_csv(caminho, parse_dates=["data"])
-        df_old["data"] = df_old["data"].dt.date
-    else:
-        df_old = pd.DataFrame(columns=df_novo.columns)
+        # Carrega histórico antigo (se existir)
+        if caminho.exists() and caminho.stat().st_size > 0:
+            df_old = pd.read_csv(caminho, parse_dates=["data"])
+            df_old["data"] = df_old["data"].dt.date
+        else:
+            df_old = pd.DataFrame(columns=df_novo.columns)
 
-    # Garante que ambos têm as mesmas colunas
-    colunas_final = sorted(set(df_old.columns).union(set(df_novo.columns)))
-    df_old = df_old.reindex(columns=colunas_final)
-    df_novo = df_novo.reindex(columns=colunas_final)
+        # Garante que ambos têm as mesmas colunas
+        colunas_final = sorted(set(df_old.columns).union(set(df_novo.columns)))
+        df_old = df_old.reindex(columns=colunas_final)
+        df_novo = df_novo.reindex(columns=colunas_final)
 
-    frames = []
-    for f in (df_old, df_novo):
-        if f is None or f.empty:
-            continue
-        frames.append(f)
+        frames = []
+        for f in (df_old, df_novo):
+            if f is None or f.empty:
+                continue
+            frames.append(f)
 
-    if frames:
-        df = pd.concat(frames, ignore_index=True)
-    else:
-        df = pd.DataFrame(columns=df_novo.columns)
+        if frames:
+            df = pd.concat(frames, ignore_index=True)
+        else:
+            df = pd.DataFrame(columns=df_novo.columns)
 
-    # Remove duplicatas por data (fica com o último registro daquela data)
-    df["data"] = pd.to_datetime(df["data"]).dt.date
-    df = df.drop_duplicates(subset=["data"], keep="last")
-    df = df.sort_values("data").reset_index(drop=True)
+        # Remove duplicatas por data (fica com o último registro daquela data)
+        df["data"] = pd.to_datetime(df["data"]).dt.date
+        df = df.drop_duplicates(subset=["data"], keep="last")
+        df = df.sort_values("data").reset_index(drop=True)
 
-    # Salva em disco
-    df.to_csv(caminho, index=False, encoding="utf-8")
+        # Salva em disco
+        df.to_csv(caminho, index=False, encoding="utf-8")
 
-    return df
+        return df
+    except Exception as e:
+        logging.error(f"Erro ao atualizar histórico Ibovespa: {e}")
+        return pd.DataFrame(columns=["data", "valor"])
 
 
 def carregar_historico_ibovespa(caminho: str = HIST_PATH) -> pd.DataFrame:
     """
     Carrega o histórico local do Ibovespa salvo em CSV.
     """
-    if not os.path.exists(caminho) or os.path.getsize(caminho) == 0:
+    if not caminho.exists() or caminho.stat().st_size == 0:
         raise FileNotFoundError(f"Histórico do Ibovespa não encontrado em {caminho}")
 
     df = pd.read_csv(caminho, parse_dates=["data"])

@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from datetime import date
 from typing import Optional
 
 import pandas as pd
+
+logging.basicConfig(level=logging.WARNING)
 import requests
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -79,15 +82,19 @@ def atualizar_caged_saldo_brasil_csv(max_anos: int = 10) -> pd.DataFrame:
     Atualiza o CSV usado pelo painel:
         data/mercado_trabalho/caged_saldo_brasil.csv
     """
-    df = baixar_caged_saldo_ipeadata(max_anos=max_anos)
+    try:
+        df = baixar_caged_saldo_ipeadata(max_anos=max_anos)
 
-    CSV_CAGED_SALDO.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(CSV_CAGED_SALDO, index=False)
+        CSV_CAGED_SALDO.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(CSV_CAGED_SALDO, index=False)
 
-    print(
-        f"[CAGED] CSV atualizado com {len(df)} linhas em {CSV_CAGED_SALDO}"
-    )
-    return df
+        print(
+            f"[CAGED] CSV atualizado com {len(df)} linhas em {CSV_CAGED_SALDO}"
+        )
+        return df
+    except Exception as e:
+        logging.error(f"Erro ao atualizar CAGED: {e}")
+        raise
 
 
 def carregar_caged_saldo_csv(max_anos: int = 10) -> Optional[pd.DataFrame]:

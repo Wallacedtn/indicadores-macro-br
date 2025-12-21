@@ -2,12 +2,15 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from datetime import datetime, date
 from typing import Optional, Dict, Tuple, List
 from io import BytesIO
 import re
 import unicodedata
+
+logging.basicConfig(level=logging.WARNING)
 import subprocess
 import shutil
 import time as _time

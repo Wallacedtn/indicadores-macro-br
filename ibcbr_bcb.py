@@ -11,7 +11,7 @@ DATA_ATIVIDADE_DIR = BASE_DIR / "data" / "atividade"
 IBC_BR_CSV = DATA_ATIVIDADE_DIR / "ibcbr.csv"
 
 # BCB/SGS: IBC-Br dessazonalizado (nível)
-SERIE_IBCBR_SA = 24363
+SERIE_IBCBR_SA = 24364
 
 def atualizar_ibcbr_csv(
     data_inicial: str = "01/01/2003",

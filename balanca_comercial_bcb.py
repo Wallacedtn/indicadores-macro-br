@@ -74,21 +74,25 @@ def atualizar_csv_balanca_comercial() -> None:
     Baixa a série do BCB e grava em:
       data/setor_externo/balanca_comercial_mensal_usd.csv
     """
-    df = baixar_balanca_comercial_bcb()
-    BALANCA_COMERCIAL_CSV.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(BALANCA_COMERCIAL_CSV, index=False, encoding="utf-8")
-    logger.info(
-        "CSV da balança comercial atualizado: %s linhas em %s",
-        len(df),
-        BALANCA_COMERCIAL_CSV,
-    )
+    try:
+        df = baixar_balanca_comercial_bcb()
+        BALANCA_COMERCIAL_CSV.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(BALANCA_COMERCIAL_CSV, index=False, encoding="utf-8")
+        logger.info(
+            "CSV da balança comercial atualizado: %s linhas em %s",
+            len(df),
+            BALANCA_COMERCIAL_CSV,
+        )
 
-    # Mensagenzinha de sanity check no console
-    ultimo = df.iloc[-1]
-    print(
-        f"Último mês: {ultimo['data'].strftime('%m/%Y')} | "
-        f"saldo: {ultimo['saldo_usd_milhoes'] / 1000:.1f} US$ bi"
-    )
+        # Mensagenzinha de sanity check no console
+        ultimo = df.iloc[-1]
+        print(
+            f"Último mês: {ultimo['data'].strftime('%m/%Y')} | "
+            f"saldo: {ultimo['saldo_usd_milhoes'] / 1000:.1f} US$ bi"
+        )
+    except Exception as e:
+        logger.error(f"Erro ao atualizar balança comercial: {e}")
+        raise
 
 
 if __name__ == "__main__":
